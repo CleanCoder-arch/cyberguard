@@ -117,11 +117,13 @@ def analyze_message_risk(
     text = message.lower()
 
 
-    score = 0
-
+    adjustments = []
     reasons = []
-
     positive_signals = []
+
+    def add_risk_points(delta, reason):
+        adjustments.append({"rule": reason, "delta": delta})
+        reasons.append(reason)
 
 
     # --------------------------------------------------------
@@ -130,27 +132,15 @@ def analyze_message_risk(
 
     if phishing_probability >= 0.80:
 
-        score += 35
-
-        reasons.append(
-            "ML detector shows a high phishing probability."
-        )
+        add_risk_points(35, "ML detector shows a high phishing probability.")
 
     elif phishing_probability >= 0.60:
 
-        score += 25
-
-        reasons.append(
-            "ML detector shows an elevated phishing probability."
-        )
+        add_risk_points(25, "ML detector shows an elevated phishing probability.")
 
     elif phishing_probability >= 0.40:
 
-        score += 10
-
-        reasons.append(
-            "ML detector shows some phishing indicators."
-        )
+        add_risk_points(10, "ML detector shows some phishing indicators.")
 
     else:
 
@@ -167,15 +157,11 @@ def analyze_message_risk(
 
     if matched_urgency:
 
-        score += min(
-            len(matched_urgency) * 5,
-            15
-        )
-
-        reasons.append(
+        add_risk_points(
+            min(len(matched_urgency) * 5, 15),
             "Urgency or pressure language detected: "
             + ", ".join(sorted(matched_urgency))
-            + "."
+            + ".",
         )
 
 
@@ -187,15 +173,11 @@ def analyze_message_risk(
 
     if matched_account:
 
-        score += min(
-            len(matched_account) * 4,
-            15
-        )
-
-        reasons.append(
+        add_risk_points(
+            min(len(matched_account) * 4, 15),
             "Account/security-related language detected: "
             + ", ".join(sorted(matched_account))
-            + "."
+            + ".",
         )
 
 
@@ -207,15 +189,11 @@ def analyze_message_risk(
 
     if matched_credentials:
 
-        score += min(
-            len(matched_credentials) * 8,
-            20
-        )
-
-        reasons.append(
+        add_risk_points(
+            min(len(matched_credentials) * 8, 20),
             "Credential or sensitive-information language detected: "
             + ", ".join(sorted(matched_credentials))
-            + "."
+            + ".",
         )
 
 
@@ -227,15 +205,11 @@ def analyze_message_risk(
 
     if matched_financial:
 
-        score += min(
-            len(matched_financial) * 3,
-            15
-        )
-
-        reasons.append(
+        add_risk_points(
+            min(len(matched_financial) * 3, 15),
             "Financial/payment-related language detected: "
             + ", ".join(sorted(matched_financial))
-            + "."
+            + ".",
         )
 
 
@@ -247,15 +221,11 @@ def analyze_message_risk(
 
     if matched_prize:
 
-        score += min(
-            len(matched_prize) * 5,
-            20
-        )
-
-        reasons.append(
+        add_risk_points(
+            min(len(matched_prize) * 5, 20),
             "Prize/reward or claim language detected: "
             + ", ".join(sorted(matched_prize))
-            + "."
+            + ".",
         )
 
 
@@ -267,11 +237,7 @@ def analyze_message_risk(
 
     if urls:
 
-        score += 15
-
-        reasons.append(
-            "Message contains a web link or URL."
-        )
+        add_risk_points(15, "Message contains a web link or URL.")
 
 
     # --------------------------------------------------------
@@ -293,31 +259,26 @@ def analyze_message_risk(
         )
     ):
 
-        score += 15
-
-        reasons.append(
+        add_risk_points(
+            15,
             "Urgency is combined with account, "
-            "credential, or financial-related content."
+            "credential, or financial-related content.",
         )
 
 
     if has_prize and urls:
 
-        score += 15
-
-        reasons.append(
-            "Prize/reward language is combined with a web link."
-        )
+        add_risk_points(15, "Prize/reward language is combined with a web link.")
 
 
     # --------------------------------------------------------
     # 9. SCORE LIMIT
     # --------------------------------------------------------
 
-    score = max(
-        0,
-        min(score, 100)
-    )
+    raw_score = sum(step["delta"] for step in adjustments)
+    score = max(0, min(raw_score, 100))
+    if raw_score > 100:
+        adjustments.append({"rule": "Score cap at 100.", "delta": score - raw_score})
 
 
     # --------------------------------------------------------
@@ -372,6 +333,11 @@ def analyze_message_risk(
         "message": message,
 
         "risk_score": score,
+        "score_breakdown": {
+            "starting_score": 0,
+            "adjustments": adjustments,
+            "final_score": score,
+        },
 
         "risk_level": risk_level,
 

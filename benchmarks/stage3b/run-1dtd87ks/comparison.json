@@ -1,0 +1,145 @@
+{
+  "source": {
+    "run": "run-1dtd87ks",
+    "comparison_sha256": "1976e68f167134a82d8240477e468f7f4b28478f1542a2028640da8b4b9d4b1e",
+    "validation_lock_sha256": "c76f3829e9f73a10a0feffa274b14a6a9f3ce592071d30df8b308685c57472ad"
+  },
+  "split_audit": {
+    "seed": 42,
+    "stage3a_report": {
+      "file": "report.json",
+      "sha256": "fab36cd90d4d82229891ce50af6c9952f09fc031108e23c347a1f61aadcd2adc"
+    }
+  },
+  "baseline_artifacts": {
+    "sms": {
+      "file": "sms_baseline.joblib",
+      "sha256": "b6238e662e6003855d900227a1f547c9eafeb2809df75b974cf8e7bfd4f72848"
+    },
+    "url": {
+      "file": "url_hybrid_baseline.joblib",
+      "sha256": "a35bcac56ccebf058be669f2bbdf48131c30009e55fad0975c2ce72024e9ce2b"
+    }
+  },
+  "target_false_positive_rate": 0.01,
+  "validation_selection": {
+    "sms": {
+      "selected_model": "linear_svm_calibrated",
+      "candidates": {
+        "logistic": {
+          "threshold": 0.45218818492440227
+        },
+        "linear_svm_calibrated": {
+          "threshold": 0.19294988994807782
+        }
+      }
+    },
+    "url": {
+      "selected_model": "logistic",
+      "candidates": {
+        "logistic": {
+          "threshold": 0.8335607622866638
+        },
+        "linear_svm_calibrated": {
+          "threshold": 0.8988177846696142
+        },
+        "lexical_logistic": {
+          "threshold": 0.7976504727669125
+        },
+        "lexical_tree": {
+          "threshold": 0.9267894346433387
+        }
+      }
+    }
+  },
+  "held_out_test": {
+    "url": {
+      "logistic": {
+        "model_name": "Stage 3A logistic regression",
+        "threshold": 0.8335607622866638,
+        "accuracy": 0.9495376128261646,
+        "precision": 0.9861815077628981,
+        "recall": 0.828024907046544,
+        "f1": 0.9002094189840745,
+        "average_precision": 0.9800369172708719,
+        "false_positive_rate": 0.004398328974628944,
+        "inference_latency": {
+          "median_ms": 1.7635999999999998,
+          "p95_ms": 2.366725
+        }
+      },
+      "linear_svm_calibrated": {
+        "model_name": "Calibrated linear SVM",
+        "threshold": 0.8988177846696142,
+        "accuracy": 0.9421000135452967,
+        "precision": 0.9915750711376443,
+        "recall": 0.7961295524795055,
+        "f1": 0.8831685136411072,
+        "average_precision": 0.9798957499951678,
+        "false_positive_rate": 0.0025642767381041333,
+        "inference_latency": {
+          "median_ms": 2.2351,
+          "p95_ms": 3.6024000000000003
+        }
+      },
+      "lexical_logistic": {
+        "model_name": "Lexical logistic regression",
+        "threshold": 0.7976504727669125,
+        "accuracy": 0.8267802829735621,
+        "precision": 0.9373808010171647,
+        "recall": 0.3963176992339739,
+        "f1": 0.5570983281382828,
+        "average_precision": 0.7784570569009306,
+        "false_positive_rate": 0.010036341405427435,
+        "inference_latency": {
+          "median_ms": 1.1129,
+          "p95_ms": 1.3642
+        }
+      },
+      "lexical_tree": {
+        "model_name": "Lexical boosted trees",
+        "threshold": 0.9267894346433387,
+        "accuracy": 0.8394143506261621,
+        "precision": 0.9924660441426146,
+        "recall": 0.4189849034627962,
+        "f1": 0.5892210287586228,
+        "average_precision": 0.9077053911466973,
+        "false_positive_rate": 0.001205719525863533,
+        "inference_latency": {
+          "median_ms": 1.568,
+          "p95_ms": 2.082325
+        }
+      }
+    },
+    "sms": {
+      "logistic": {
+        "model_name": "Stage 3A logistic regression",
+        "threshold": 0.45218818492440227,
+        "accuracy": 0.9844497607655502,
+        "precision": 0.9459459459459459,
+        "recall": 0.9375,
+        "f1": 0.9417040358744395,
+        "average_precision": 0.9742160037091956,
+        "false_positive_rate": 0.008287292817679558,
+        "inference_latency": {
+          "median_ms": 0.3735,
+          "p95_ms": 0.50215
+        }
+      },
+      "linear_svm_calibrated": {
+        "model_name": "Calibrated linear SVM",
+        "threshold": 0.19294988994807782,
+        "accuracy": 0.9796650717703349,
+        "precision": 0.9130434782608695,
+        "recall": 0.9375,
+        "f1": 0.9251101321585903,
+        "average_precision": 0.9747333807584749,
+        "false_positive_rate": 0.013812154696132596,
+        "inference_latency": {
+          "median_ms": 0.4494,
+          "p95_ms": 0.610225
+        }
+      }
+    }
+  }
+}

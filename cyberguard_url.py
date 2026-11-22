@@ -1,7 +1,7 @@
 import pandas as pd
 from scipy.sparse import hstack, csr_matrix
 
-from detector_models import MODELS_DIR, load_artifacts
+from detector_models import MODELS_DIR, explain_model, load_artifacts
 from url_features import extract_features
 from risk_engine import analyze_risk
 from url_normalizer import normalize_url
@@ -146,10 +146,19 @@ def analyze_url(url):
 
         "malicious_probability":
             malicious_probability,
+        "model_explanation": explain_model(
+            model,
+            vectorizer,
+            hybrid_features,
+            positive_class="MALICIOUS",
+            text_kind="url_tfidf",
+            structure=feature_dict,
+        ),
 
         # Risk result
         "risk_score":
             risk_result["risk_score"],
+        "score_breakdown": risk_result["score_breakdown"],
 
         "risk_level":
             risk_result["risk_level"],
@@ -168,7 +177,8 @@ def analyze_url(url):
 
         # Features
         "features":
-            feature_dict
+            feature_dict,
+        "checks": [{"check": "URL analysis", "status": "completed"}],
     }
 
     return result

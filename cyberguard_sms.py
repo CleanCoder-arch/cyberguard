@@ -1,4 +1,4 @@
-from detector_models import MODELS_DIR, load_artifacts
+from detector_models import MODELS_DIR, explain_model, load_artifacts
 from sms_risk_engine import analyze_message_risk
 
 
@@ -88,9 +88,17 @@ def analyze_sms(message, *, detected_urls=None):
 
         "phishing_probability":
             phishing_probability,
+        "model_explanation": explain_model(
+            model,
+            vectorizer,
+            message_vector,
+            positive_class="PHISHING/SPAM",
+            text_kind="sms_tfidf",
+        ),
 
         "risk_score":
             risk_result["risk_score"],
+        "score_breakdown": risk_result["score_breakdown"],
 
         "risk_level":
             risk_result["risk_level"],

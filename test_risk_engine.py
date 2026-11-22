@@ -104,3 +104,19 @@ for item in test_cases:
         "\nRecommendation:",
         result["recommendation"]
     )
+
+
+def test_url_score_breakdown_accounts_for_trusted_domain_and_floor():
+    url = "https://www.wikipedia.org"
+    result = analyze_risk(url, 0.2, extract_features(url))
+
+    assert result["risk_score"] == 0
+    assert result["risk_level"] == "LOW"
+    assert result["score_breakdown"] == {
+        "starting_score": 0,
+        "adjustments": [
+            {"rule": "Hostname belongs to a recognized domain (wikipedia.org).", "delta": -25},
+            {"rule": "Score floor at 0.", "delta": 25},
+        ],
+        "final_score": 0,
+    }

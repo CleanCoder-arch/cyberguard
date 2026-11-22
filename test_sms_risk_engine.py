@@ -138,3 +138,19 @@ for item in test_messages:
         "\nRecommendation:",
         result["recommendation"]
     )
+
+
+def test_sms_score_breakdown_accounts_for_rule_weights_and_cap():
+    result = analyze_message_risk(
+        "Urgent final warning about account verification, password, OTP and PIN.",
+        0.8,
+        detected_urls=["https://example.com"],
+    )
+
+    assert result["risk_score"] == 100
+    assert result["risk_level"] == "HIGH"
+    breakdown = result["score_breakdown"]
+    assert breakdown["starting_score"] == 0
+    assert breakdown["final_score"] == result["risk_score"]
+    assert [step["delta"] for step in breakdown["adjustments"]] == [35, 10, 8, 20, 15, 15, -3]
+    assert breakdown["adjustments"][-1]["rule"] == "Score cap at 100."

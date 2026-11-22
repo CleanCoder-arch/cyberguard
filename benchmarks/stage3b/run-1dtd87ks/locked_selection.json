@@ -1,0 +1,48 @@
+{
+  "seed": 42,
+  "stage3a_report": {
+    "file": "report.json",
+    "sha256": "fab36cd90d4d82229891ce50af6c9952f09fc031108e23c347a1f61aadcd2adc"
+  },
+  "baseline_artifacts": {
+    "sms": {
+      "file": "sms_baseline.joblib",
+      "sha256": "b6238e662e6003855d900227a1f547c9eafeb2809df75b974cf8e7bfd4f72848"
+    },
+    "url": {
+      "file": "url_hybrid_baseline.joblib",
+      "sha256": "a35bcac56ccebf058be669f2bbdf48131c30009e55fad0975c2ce72024e9ce2b"
+    }
+  },
+  "target_false_positive_rate": 0.01,
+  "validation_selection": {
+    "sms": {
+      "selected_model": "linear_svm_calibrated",
+      "candidates": {
+        "logistic": {
+          "threshold": 0.45218818492440227
+        },
+        "linear_svm_calibrated": {
+          "threshold": 0.19294988994807782
+        }
+      }
+    },
+    "url": {
+      "selected_model": "logistic",
+      "candidates": {
+        "logistic": {
+          "threshold": 0.8335607622866638
+        },
+        "linear_svm_calibrated": {
+          "threshold": 0.8988177846696142
+        },
+        "lexical_logistic": {
+          "threshold": 0.7976504727669125
+        },
+        "lexical_tree": {
+          "threshold": 0.9267894346433387
+        }
+      }
+    }
+  }
+}

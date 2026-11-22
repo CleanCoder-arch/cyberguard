@@ -245,10 +245,13 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
             normalized with an HTTP placeholder for the model.
     """
 
-    score = 0
-
+    adjustments = []
     reasons = []
     positive_signals = []
+
+    def add_risk_points(delta, reason):
+        adjustments.append({"rule": reason, "delta": delta})
+        reasons.append(reason)
 
     hostname = get_hostname(url)
     try:
@@ -270,27 +273,15 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if malicious_probability >= 0.80:
 
-        score += 30
-
-        reasons.append(
-            "ML detector shows a high malicious probability."
-        )
+        add_risk_points(30, "ML detector shows a high malicious probability.")
 
     elif malicious_probability >= 0.60:
 
-        score += 20
-
-        reasons.append(
-            "ML detector shows an elevated malicious probability."
-        )
+        add_risk_points(20, "ML detector shows an elevated malicious probability.")
 
     elif malicious_probability >= 0.40:
 
-        score += 10
-
-        reasons.append(
-            "ML detector shows some malicious indicators."
-        )
+        add_risk_points(10, "ML detector shows some malicious indicators.")
 
     else:
 
@@ -310,11 +301,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     elif scheme == "http":
 
-        score += 10
-
-        reasons.append(
-            "URL does not use HTTPS."
-        )
+        add_risk_points(10, "URL does not use HTTPS.")
 
     # --------------------------------------------------------
     # 3. IP ADDRESS
@@ -322,11 +309,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if is_ip_address:
 
-        score += 25
-
-        reasons.append(
-            "URL uses an IP address instead of a normal domain."
-        )
+        add_risk_points(25, "URL uses an IP address instead of a normal domain.")
 
     # --------------------------------------------------------
     # 4. SUSPICIOUS TLD
@@ -338,11 +321,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
         if tld in SUSPICIOUS_TLDS:
 
-            score += 15
-
-            reasons.append(
-                f"Domain uses a potentially suspicious TLD ({tld})."
-            )
+            add_risk_points(15, f"Domain uses a potentially suspicious TLD ({tld}).")
 
     # --------------------------------------------------------
     # 5. SUSPICIOUS KEYWORDS
@@ -390,14 +369,13 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
             20
         )
 
-        score += keyword_score
-
-        reasons.append(
+        add_risk_points(
+            keyword_score,
             "Suspicious keywords detected: "
             + ", ".join(
                 sorted(matched_keywords)
             )
-            + "."
+            + ".",
         )
 
     # --------------------------------------------------------
@@ -406,11 +384,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if features.get("at_symbol", 0) == 1:
 
-        score += 20
-
-        reasons.append(
-            "URL contains an @ symbol, which can obscure the destination."
-        )
+        add_risk_points(20, "URL contains an @ symbol, which can obscure the destination.")
 
     # --------------------------------------------------------
     # 7. PUNYCODE
@@ -418,11 +392,10 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if features.get("has_punycode", 0) == 1:
 
-        score += 20
-
-        reasons.append(
+        add_risk_points(
+            20,
             "Domain contains punycode, which can be associated with "
-            "look-alike domains."
+            "look-alike domains.",
         )
 
     # --------------------------------------------------------
@@ -431,11 +404,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if features.get("encoded_chars", 0) > 0:
 
-        score += 5
-
-        reasons.append(
-            "URL contains encoded characters."
-        )
+        add_risk_points(5, "URL contains encoded characters.")
 
     # --------------------------------------------------------
     # 9. MANY SUBDOMAINS
@@ -443,11 +412,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if features.get("subdomains", 0) >= 3:
 
-        score += 10
-
-        reasons.append(
-            "URL contains multiple subdomains."
-        )
+        add_risk_points(10, "URL contains multiple subdomains.")
 
     # --------------------------------------------------------
     # 10. LONG URL
@@ -455,11 +420,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if features.get("url_len", 0) >= 100:
 
-        score += 10
-
-        reasons.append(
-            "URL is unusually long."
-        )
+        add_risk_points(10, "URL is unusually long.")
 
     # --------------------------------------------------------
     # 11. MANY HYPHENS
@@ -467,11 +428,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if features.get("domain_hyphens", 0) >= 2:
 
-        score += 5
-
-        reasons.append(
-            "Domain contains multiple hyphens."
-        )
+        add_risk_points(5, "Domain contains multiple hyphens.")
 
     # --------------------------------------------------------
     # 12. QUERY PARAMETERS
@@ -479,11 +436,7 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if features.get("query_len", 0) >= 50:
 
-        score += 5
-
-        reasons.append(
-            "URL contains a long query string."
-        )
+        add_risk_points(5, "URL contains a long query string.")
 
     # --------------------------------------------------------
     # 13. BRAND IMPERSONATION
@@ -493,11 +446,10 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if impersonated_brand:
 
-        score += 25
-
-        reasons.append(
+        add_risk_points(
+            25,
             f"Hostname appears to impersonate "
-            f"{impersonated_brand}."
+            f"{impersonated_brand}.",
         )
 
     # --------------------------------------------------------
@@ -510,11 +462,10 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
     if nested_urls:
 
-        score += 15
-
-        reasons.append(
+        add_risk_points(
+            15,
             "URL contains an embedded external URL, "
-            "which may indicate a redirect or phishing technique."
+            "which may indicate a redirect or phishing technique.",
         )
 
     # --------------------------------------------------------
@@ -525,23 +476,20 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
 
         # Positive signal only.
         # It does not completely override suspicious indicators.
-        score -= 25
-
-        positive_signals.append(
-            f"Hostname belongs to a recognized domain ({root_domain})."
-        )
+        signal = f"Hostname belongs to a recognized domain ({root_domain})."
+        positive_signals.append(signal)
+        adjustments.append({"rule": signal, "delta": -25})
 
     # --------------------------------------------------------
     # 16. KEEP SCORE WITHIN 0-100
     # --------------------------------------------------------
 
-    score = max(
-        0,
-        min(
-            score,
-            100
-        )
-    )
+    raw_score = sum(step["delta"] for step in adjustments)
+    score = max(0, min(raw_score, 100))
+    if raw_score < 0:
+        adjustments.append({"rule": "Score floor at 0.", "delta": score - raw_score})
+    elif raw_score > 100:
+        adjustments.append({"rule": "Score cap at 100.", "delta": score - raw_score})
 
     # --------------------------------------------------------
     # 17. RISK LEVEL
@@ -592,6 +540,11 @@ def analyze_risk(url, malicious_probability, features, *, scheme=None):
         "url": url,
         "hostname": hostname,
         "risk_score": score,
+        "score_breakdown": {
+            "starting_score": 0,
+            "adjustments": adjustments,
+            "final_score": score,
+        },
         "risk_level": risk_level,
         "malicious_probability": malicious_probability,
         "reasons": reasons,

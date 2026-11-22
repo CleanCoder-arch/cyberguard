@@ -1,5 +1,6 @@
 from cyberguard_url import analyze_url
 from cyberguard_sms import analyze_sms
+from phishing_feed import get_feed_cache
 from sms_url_extractor import extract_urls
 
 
@@ -83,15 +84,23 @@ def calculate_combined_risk(
         base_score +
         multi_url_bonus
     )
+    score_adjustments = []
+    if multi_url_bonus:
+        score_adjustments.append({
+            "rule": "Additional suspicious links",
+            "delta": multi_url_bonus,
+        })
 
     # --------------------------------------------------------
     # Cap score
     # --------------------------------------------------------
 
-    combined_score = min(
-        combined_score,
-        100
-    )
+    if combined_score > 100:
+        score_adjustments.append({
+            "rule": "Score capped at 100",
+            "delta": 100 - combined_score,
+        })
+        combined_score = 100
 
     # --------------------------------------------------------
     # Risk level
@@ -139,6 +148,11 @@ def calculate_combined_risk(
         "risk_score": combined_score,
         "risk_level": combined_level,
         "recommendation": recommendation,
+        "score_breakdown": {
+            "starting_score": base_score,
+            "adjustments": score_adjustments,
+            "final_score": combined_score,
+        },
 
         # Additional transparency
         "base_score": base_score,
@@ -167,9 +181,9 @@ def analyze_input(
 
     if input_type.upper() == "URL":
 
-        return analyze_url(
-            content
-        )
+        result = analyze_url(content)
+        feed = get_feed_cache().refresh_if_due()
+        return {**result, "phishing_feed": feed.lookup(content)}
 
     # ========================================================
     # SMS
@@ -183,10 +197,13 @@ def analyze_input(
 
         detected_urls = []
         url_extraction_error = None
+        extraction_check = {"check": "Link extraction", "status": "completed"}
         try:
             detected_urls = extract_urls(content)
         except Exception as error:
             url_extraction_error = str(error) or "The link extraction check failed."
+            extraction_check.update(status="failed", detail=url_extraction_error)
+        checks = [extraction_check]
 
         # --------------------------------------------------------
         # 2. Analyze the SMS, including link signals when extraction succeeds
@@ -194,38 +211,39 @@ def analyze_input(
 
         sms_result = None
         sms_error = None
+        sms_check = {"check": "SMS analysis", "status": "completed"}
         try:
             sms_result = analyze_sms(content, detected_urls=detected_urls)
         except Exception as error:
             sms_error = str(error) or "The SMS check failed."
+            sms_check.update(status="failed", detail=sms_error)
+        else:
+            if url_extraction_error is not None:
+                sms_check["detail"] = (
+                    "The SMS was scored without link signals because extraction failed."
+                )
+        checks.append(sms_check)
 
         # --------------------------------------------------------
         # 3. Analyze every URL
         # --------------------------------------------------------
 
+        feed = get_feed_cache().refresh_if_due()
         url_results = []
+        if not detected_urls:
+            detail = "Link extraction failed." if url_extraction_error else "No links detected."
+            checks.append({"check": "URL analysis", "status": "skipped", "detail": detail})
 
         for url in detected_urls:
-
+            url_check = {"check": "URL analysis", "status": "completed", "url": url}
             try:
-
-                url_result = analyze_url(
-                    url
-                )
-
-                url_results.append(
-                    url_result
-                )
-
+                url_result = analyze_url(url)
             except Exception as error:
-
-                url_results.append({
-
-                    "url": url,
-
-                    "error": str(error) or "The URL check failed."
-
-                })
+                detail = str(error) or "The URL check failed."
+                url_check.update(status="failed", detail=detail)
+                url_result = {"url": url, "error": detail}
+            url_results.append({**url_result, "phishing_feed": feed.lookup(url)})
+            checks.append(url_check)
 
         # ----------------------------------------------------
         # 4. Calculate combined risk
@@ -238,6 +256,13 @@ def analyze_input(
             and all("error" not in result for result in url_results)
         ):
             combined_result = calculate_combined_risk(sms_result, url_results)
+            checks.append({"check": "Overall risk", "status": "completed"})
+        else:
+            checks.append({
+                "check": "Overall risk",
+                "status": "skipped",
+                "detail": "Requires successful link extraction and analysis of the SMS and every detected link.",
+            })
 
         # ----------------------------------------------------
         # 5. Return the available results
@@ -255,7 +280,9 @@ def analyze_input(
 
             "url_results": url_results,
 
-            "combined_risk": combined_result
+            "combined_risk": combined_result,
+            "checks": checks,
+            "phishing_feed": feed.metadata(),
 
         }
         if sms_error is not None:

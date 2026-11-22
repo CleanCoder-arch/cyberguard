@@ -1,12 +1,28 @@
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from cyberguard_url import analyze_url
 from cyberguard_sms import analyze_sms
 from detector_models import DetectorUnavailableError
+from phishing_feed import PhishingFeedCache
 from sms_url_extractor import extract_urls
-from cyberguard import analyze_input
+from cyberguard import analyze_input, calculate_combined_risk
+
+
+def setUpModule():
+    directory = TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+
+    def fetch_fixture(endpoint, *, timeout):
+        return b"https://example.org/Fixture\n"
+
+    feed = PhishingFeedCache(Path(directory.name) / "feed.sqlite3", fetch=fetch_fixture)
+    feed_patch = patch("cyberguard.get_feed_cache", return_value=feed)
+    feed_patch.start()
+    unittest.addModuleCleanup(feed_patch.stop)
 
 
 class TestCyberGuard(unittest.TestCase):
@@ -104,6 +120,17 @@ class TestCyberGuard(unittest.TestCase):
         self.assertEqual(result["url_results"][1]["url"], invalid)
         self.assertIn("port", result["url_results"][1]["error"].lower())
         self.assertIsNone(result["combined_risk"])
+        self.assertEqual(
+            [(check["check"], check["status"], check.get("url")) for check in result["checks"]],
+            [
+                ("Link extraction", "completed", None),
+                ("SMS analysis", "completed", None),
+                ("URL analysis", "completed", "https://example.com/"),
+                ("URL analysis", "failed", invalid),
+                ("Overall risk", "skipped", None),
+            ],
+        )
+        self.assertEqual(result["checks"][3]["detail"], result["url_results"][1]["error"])
 
     def test_normal_sms_combined_analysis(self):
         result = analyze_input(
@@ -116,6 +143,24 @@ class TestCyberGuard(unittest.TestCase):
             "combined_risk",
             result
         )
+        self.assertEqual(result["checks"][-2]["detail"], "No links detected.")
+        self.assertEqual(result["checks"][-1]["status"], "completed")
+
+    def test_combined_risk_reports_link_bonus_and_cap(self):
+        result = calculate_combined_risk(
+            {"risk_score": 95},
+            [{"risk_score": 60}, {"risk_score": 30}, {"risk_score": 29}],
+        )
+
+        self.assertEqual(result["risk_level"], "HIGH")
+        self.assertEqual(result["suspicious_url_count"], 2)
+        self.assertEqual(result["score_breakdown"]["starting_score"], 95)
+        self.assertEqual(
+            [adjustment["delta"] for adjustment in result["score_breakdown"]["adjustments"]],
+            [10, -5],
+        )
+        self.assertEqual(result["score_breakdown"]["final_score"], 100)
+        self.assertEqual(result["risk_score"], 100)
 
     def test_phishing_sms_with_url(self):
         result = analyze_input(
@@ -178,10 +223,14 @@ class TestUnavailableDetectors(unittest.TestCase):
             result = analyze_input("SMS", f"See {successful_url} or {failed_url}")
 
         self.assertIsNotNone(result["sms_result"])
-        self.assertEqual(result["url_results"], [
+        successful, failed = result["url_results"]
+        self.assertEqual(
+            {key: value for key, value in successful.items() if key != "phishing_feed"},
             successful_result,
-            {"url": failed_url, "error": "Check failed"},
-        ])
+        )
+        self.assertEqual(failed["url"], failed_url)
+        self.assertEqual(failed["error"], "Check failed")
+        self.assertIs(failed["phishing_feed"]["matched"], False)
         self.assertIsNone(result["combined_risk"])
 
     def test_failed_link_extraction_preserves_sms_check(self):
@@ -191,6 +240,11 @@ class TestUnavailableDetectors(unittest.TestCase):
         self.assertIn("risk_score", result["sms_result"])
         self.assertEqual(result["url_extraction_error"], "Extraction failed")
         self.assertIsNone(result["combined_risk"])
+        self.assertEqual(
+            [check["status"] for check in result["checks"]],
+            ["failed", "completed", "skipped", "skipped"],
+        )
+        self.assertIn("without link signals", result["checks"][1]["detail"])
 
 
 if __name__ == "__main__":
