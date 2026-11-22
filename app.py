@@ -11,6 +11,8 @@ import streamlit as st
 
 
 from cyberguard import analyze_input
+from detector_models import DetectorUnavailableError
+from url_normalizer import URLValidationError
 
 
 
@@ -258,6 +260,10 @@ def save_scan(
     content,
     result
 ):
+    verdict, detector_result = get_scan_results(result, scan_type)
+    if verdict is None:
+        return
+
     os.makedirs("data", exist_ok=True)
 
     history = load_history()
@@ -267,11 +273,6 @@ def save_scan(
     if len(preview) > 120:
         preview = preview[:120] + "..."
 
-    display_result = get_display_result(
-        result,
-        scan_type
-    )
-
     new_record = pd.DataFrame(
         [{
             "timestamp": datetime.now().strftime(
@@ -279,15 +280,9 @@ def save_scan(
             ),
             "type": scan_type,
             "input": preview,
-            "ml_prediction": display_result.get(
-                "ml_prediction", "UNKNOWN"
-            ),
-            "risk_score": display_result.get(
-                "risk_score", 0
-            ),
-            "risk_level": display_result.get(
-                "risk_level", "LOW"
-            )
+            "ml_prediction": detector_result["ml_prediction"],
+            "risk_score": verdict["risk_score"],
+            "risk_level": verdict["risk_level"]
         }]
     )
 
@@ -303,82 +298,146 @@ def save_scan(
 
 
 # ============================================================
-# RESULT NORMALIZATION
+# SCAN REPORT
 # ============================================================
 
-def get_display_result(result, input_type):
-    """Normalize URL and SMS results for the Streamlit UI."""
+def get_scan_results(result, input_type):
+    """Return the overall verdict and the primary detector's result."""
+    if input_type == "SMS":
+        return result["combined_risk"], result["sms_result"]
+    return result, result
 
-    if not isinstance(result, dict):
-        return {
-            "risk_score": 0,
-            "risk_level": "LOW",
-            "recommendation": "No result available.",
-            "ml_prediction": "UNKNOWN",
-            "phishing_probability": 0.0,
-            "malicious_probability": 0.0,
-            "reasons": [],
-            "positive_signals": [],
-        }
+
+def render_link_analysis(result):
+    st.subheader("🔗 Detected Link Analysis")
+
+    if result.get("url_extraction_error"):
+        st.error(result["url_extraction_error"])
+    elif result["detected_urls"]:
+        st.caption(
+            f"{len(result['detected_urls'])} unique URL(s) "
+            "were detected inside this message."
+        )
+    else:
+        st.info("No URLs were detected inside this message.")
+
+    for index, link in enumerate(result["url_results"], start=1):
+        if "error" in link:
+            st.error(f"Unable to analyze {link['url']}: {link['error']}")
+            continue
+
+        with st.container(border=True):
+            st.markdown(f"### 🔗 URL {index}: `{link['url']}`")
+            if scheme := link.get("scheme"):
+                st.caption(f"Scheme: {scheme}")
+            prediction_col, score_col, probability_col = st.columns(3)
+            prediction_col.metric("URL Prediction", link["ml_prediction"])
+            score_col.metric("URL Risk", f"{link['risk_score']}/100")
+            probability_col.metric(
+                "Malicious Probability", f"{link['malicious_probability'] * 100:.2f}%"
+            )
+
+            risk_message = {
+                "HIGH": (st.error, "🚨 URL Risk: HIGH"),
+                "MEDIUM": (st.warning, "⚠️ URL Risk: MEDIUM"),
+                "LOW": (st.success, "✅ URL Risk: LOW"),
+            }
+            show_message, message = risk_message[link["risk_level"]]
+            show_message(message)
+
+            if link["reasons"]:
+                st.write("**URL Risk Indicators:**")
+                for reason in link["reasons"]:
+                    st.warning(reason)
+
+
+def render_scan_result(result, input_type):
+    verdict, detector_result = get_scan_results(result, input_type)
+    st.divider()
+    st.subheader("📋 Analysis Result")
+
+    if verdict is None:
+        st.warning("Analysis incomplete. An overall verdict is unavailable.")
+    else:
+        risk_level = verdict["risk_level"]
+        risk_score = verdict["risk_score"]
+        icon = {"HIGH": "🚨", "MEDIUM": "⚠️", "LOW": "✅"}[risk_level]
+        st.markdown(
+            f"""
+            <div class="risk-{risk_level.lower()}">
+                <h2>{icon} {risk_level} RISK</h2>
+                <p>Risk Score: <strong>{risk_score}/100</strong></p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if detector_result is None:
+        st.error(result["sms_error"])
+    else:
+        if input_type == "SMS":
+            probability = detector_result["phishing_probability"]
+            probability_label = "ML Phishing Probability"
+        else:
+            probability = detector_result["malicious_probability"]
+            probability_label = "ML Malicious Probability"
+
+        if verdict is None:
+            score_col, risk_col, probability_col = st.columns(3)
+            score_col.metric("SMS Risk Score", f"{detector_result['risk_score']}/100")
+            risk_col.metric("SMS Risk Level", detector_result["risk_level"])
+        else:
+            score_col, risk_col, probability_col = st.columns(3)
+            score_col.metric("Risk Score", f"{risk_score}/100")
+            risk_col.metric("Overall Risk", risk_level)
+
+        probability_col.metric(probability_label, f"{probability * 100:.2f}%")
+        st.subheader("🧠 Machine Learning Signal")
+        st.write(f"**Prediction:** {detector_result['ml_prediction']}")
+        st.caption("The risk engine uses this probability alongside other indicators.")
+
+        indicator_scope = "SMS " if input_type == "SMS" else ""
+        st.subheader(f"⚠️ {indicator_scope}Risk Indicators")
+        if detector_result["reasons"]:
+            for reason in detector_result["reasons"]:
+                st.warning(reason)
+        else:
+            st.success(f"No major {indicator_scope}risk indicators detected.")
+
+        if detector_result["positive_signals"]:
+            st.subheader(f"✅ {indicator_scope}Positive Signals")
+            for signal in detector_result["positive_signals"]:
+                st.success(signal)
 
     if input_type == "SMS":
-        sms_result = result.get("sms_result", {})
-        combined_risk = result.get("combined_risk", {})
+        render_link_analysis(result)
+        if verdict is not None:
+            st.subheader("🛡️ Combined SMS + URL Risk")
+            score_col, risk_col, links_col = st.columns(3)
+            score_col.metric("Combined Score", f"{risk_score}/100")
+            risk_col.metric("Combined Risk", risk_level)
+            links_col.metric("Suspicious URLs", verdict["suspicious_url_count"])
+            st.caption(
+                f"Base risk: {verdict['base_score']}/100 | "
+                f"Multi-URL bonus: +{verdict['multi_url_bonus']}"
+            )
+    elif result.get("hostname"):
+        st.subheader("🌐 URL Details")
+        st.write("**Hostname:**", result["hostname"])
+        if scheme := result.get("scheme"):
+            st.write("**Scheme:**", scheme)
 
-        return {
-            "risk_score": combined_risk.get("risk_score", 0),
-            "risk_level": combined_risk.get("risk_level", "LOW"),
-            "recommendation": combined_risk.get(
-                "recommendation",
-                "No strong risk indicators were detected."
-            ),
-            "ml_prediction": sms_result.get("ml_prediction", "UNKNOWN"),
-            "phishing_probability": sms_result.get(
-                "phishing_probability", 0.0
-            ),
-            "malicious_probability": 0.0,
-            "reasons": sms_result.get("reasons", []),
-            "positive_signals": sms_result.get("positive_signals", []),
-        }
-
-    return {
-        "risk_score": result.get("risk_score", 0),
-        "risk_level": result.get("risk_level", "LOW"),
-        "recommendation": result.get(
-            "recommendation",
-            "No strong risk indicators were detected."
-        ),
-        "ml_prediction": result.get("ml_prediction", "UNKNOWN"),
-        "phishing_probability": 0.0,
-        "malicious_probability": result.get("malicious_probability", 0.0),
-        "reasons": result.get("reasons", []),
-        "positive_signals": result.get("positive_signals", []),
-    }
-
-# SESSION STATE
-
-# ============================================================
+    if verdict is not None:
+        st.subheader("🛡️ Recommendation")
+        show_recommendation = {"HIGH": st.error, "MEDIUM": st.warning, "LOW": st.info}
+        show_recommendation[risk_level](verdict["recommendation"])
 
 
-
-if "last_result" not in st.session_state:
-
-
-
+def clear_scan_report():
     st.session_state.last_result = None
 
 
-
-
-
-if "last_input_type" not in st.session_state:
-
-
-
-    st.session_state.last_input_type = None
-
-
-
+st.session_state.setdefault("last_result", None)
 
 
 # ============================================================
@@ -431,8 +490,8 @@ with st.sidebar:
 
             "ℹ️ About"
 
-        ]
-
+        ],
+        on_change=clear_scan_report,
     )
 
 
@@ -947,8 +1006,8 @@ elif page == "🔍 Scanner":
 
         ],
 
-        horizontal=True
-
+        horizontal=True,
+        on_change=clear_scan_report,
     )
 
 
@@ -971,8 +1030,8 @@ elif page == "🔍 Scanner":
 
             "Enter URL",
 
-            placeholder="https://example.com"
-
+            placeholder="https://example.com",
+            on_change=clear_scan_report,
         )
 
 
@@ -1021,8 +1080,8 @@ elif page == "🔍 Scanner":
 
             ),
 
-            height=180
-
+            height=180,
+            on_change=clear_scan_report,
         )
 
 
@@ -1056,509 +1115,29 @@ elif page == "🔍 Scanner":
 
 
     if scan_button:
-
-
-
+        clear_scan_report()
         if not user_input.strip():
-
-
-
-            st.warning(
-
-                "Please enter something to analyze."
-
-            )
-
-
-
+            st.warning("Please enter something to analyze.")
         else:
-
-
-
-            with st.spinner(
-
-                "Analyzing..."
-
-            ):
-
-
-
+            with st.spinner("Analyzing..."):
                 try:
-
-
-
-                    result = analyze_input(
-
-                        input_type,
-
-                        user_input
-
-                    )
-
-
-
-
-
-                    st.session_state.last_result = result
-
-
-
-                    st.session_state.last_input_type = input_type
-
-
-
-
-
-                    save_scan(
-
-                        input_type,
-
-                        user_input,
-
-                        result
-
-                    )
-
-
-
-
-
-                except Exception as e:
-
-
-
-                    st.error(
-
-                        "Analysis failed."
-
-                    )
-
-
-
-                    st.exception(e)
-
-
-
-
-
-    # --------------------------------------------------------
-
-    
-# ============================================================
-# DISPLAY RESULT
-# ============================================================
-
-result = st.session_state.last_result
-
-if result is not None:
-
-    result_input_type = st.session_state.get(
-        "last_input_type"
-    )
-
-    display_result = get_display_result(
-        result,
-        result_input_type
-    )
-
-    st.divider()
-
-    st.subheader(
-        "📋 Analysis Result"
-    )
-
-    # --------------------------------------------------------
-    # MAIN RISK CARD
-    # --------------------------------------------------------
-
-    risk_level = display_result["risk_level"]
-    risk_score = display_result["risk_score"]
-
-    if risk_level == "HIGH":
-
-        st.markdown(
-            f"""
-            <div class="risk-high">
-                <h2>🚨 HIGH RISK</h2>
-                <p>
-                    Risk Score:
-                    <strong>{risk_score}/100</strong>
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    elif risk_level == "MEDIUM":
-
-        st.markdown(
-            f"""
-            <div class="risk-medium">
-                <h2>⚠️ MEDIUM RISK</h2>
-                <p>
-                    Risk Score:
-                    <strong>{risk_score}/100</strong>
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    else:
-
-        st.markdown(
-            f"""
-            <div class="risk-low">
-                <h2>✅ LOW RISK</h2>
-                <p>
-                    Risk Score:
-                    <strong>{risk_score}/100</strong>
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    st.write("")
-
-    # --------------------------------------------------------
-    # METRICS
-    # --------------------------------------------------------
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(
-            "Risk Score",
-            f"{risk_score}/100"
-        )
-
-    with col2:
-        st.metric(
-            "Overall Risk",
-            risk_level
-        )
-
-    with col3:
-
-        if result_input_type == "URL":
-
-            probability = (
-                display_result["malicious_probability"] * 100
-            )
-
-            st.metric(
-                "ML Malicious Probability",
-                f"{probability:.2f}%"
-            )
-
-        else:
-
-            probability = (
-                display_result["phishing_probability"] * 100
-            )
-
-            st.metric(
-                "ML Phishing Probability",
-                f"{probability:.2f}%"
-            )
-
-    # --------------------------------------------------------
-    # ML RESULT
-    # --------------------------------------------------------
-
-    st.subheader(
-        "🧠 Machine Learning Signal"
-    )
-
-    st.write(
-        f"**Prediction:** {display_result['ml_prediction']}"
-    )
-
-    st.caption(
-        "The ML probability is one signal used by the overall "
-        "risk engine. It is not itself the final risk assessment."
-    )
-
-    # --------------------------------------------------------
-    # RISK INDICATORS
-    # --------------------------------------------------------
-
-    st.subheader(
-        "⚠️ Risk Indicators"
-    )
-
-    if display_result.get("reasons"):
-
-        for reason in display_result["reasons"]:
-            st.warning(reason)
-
-    else:
-
-        st.success(
-            "No major risk indicators detected."
-        )
-
-    # --------------------------------------------------------
-    # POSITIVE SIGNALS
-    # --------------------------------------------------------
-
-    if display_result.get("positive_signals"):
-
-        st.subheader(
-            "✅ Positive Signals"
-        )
-
-        for signal in display_result["positive_signals"]:
-            st.success(signal)
-
-    # --------------------------------------------------------
-    # SMS URL CROSS-ANALYSIS
-    # --------------------------------------------------------
-
-    if result_input_type == "SMS":
-
-        detected_urls = result.get(
-            "detected_urls",
-            []
-        )
-
-        url_results = result.get(
-            "url_results",
-            []
-        )
-
-        st.subheader(
-            "🔗 Detected Link Analysis"
-        )
-
-        if detected_urls:
-
-            st.caption(
-                f"{len(detected_urls)} unique URL(s) "
-                "were detected inside this message."
-            )
-
-        else:
-
-            st.info(
-                "No URLs were detected inside this message."
-            )
-
-        for index, url_result in enumerate(
-            url_results,
-            start=1
-        ):
-
-            if not isinstance(url_result, dict):
-
-                st.error(
-                    "Invalid URL analysis result."
-                )
-
-                continue
-
-            if "error" in url_result:
-
-                st.error(
-                    f"Unable to analyze "
-                    f"{url_result.get('url', 'Unknown URL')}: "
-                    f"{url_result['error']}"
-                )
-
-                continue
-
-            url = url_result.get(
-                "url",
-                "Unknown URL"
-            )
-
-            url_risk = url_result.get(
-                "risk_level",
-                "UNKNOWN"
-            )
-
-            url_score = url_result.get(
-                "risk_score",
-                0
-            )
-
-            probability = (
-                url_result.get(
-                    "malicious_probability",
-                    0
-                ) * 100
-            )
-
-            with st.container(border=True):
-
-                st.markdown(
-                    f"### 🔗 URL {index}: `{url}`"
-                )
-
-                col1, col2, col3 = st.columns(3)
-
-                with col1:
-
-                    st.metric(
-                        "URL Prediction",
-                        url_result.get(
-                            "ml_prediction",
-                            "UNKNOWN"
-                        )
-                    )
-
-                with col2:
-
-                    st.metric(
-                        "URL Risk",
-                        f"{url_score}/100"
-                    )
-
-                with col3:
-
-                    st.metric(
-                        "Malicious Probability",
-                        f"{probability:.2f}%"
-                    )
-
-                if url_risk == "HIGH":
-
-                    st.error(
-                        "🚨 URL Risk: HIGH"
-                    )
-
-                elif url_risk == "MEDIUM":
-
-                    st.warning(
-                        "⚠️ URL Risk: MEDIUM"
-                    )
-
+                    result = analyze_input(input_type, user_input)
+                except (DetectorUnavailableError, URLValidationError) as exc:
+                    st.error(str(exc))
+                except Exception:
+                    st.error("Analysis failed. Please try again.")
                 else:
+                    st.session_state.last_result = result
+                    try:
+                        save_scan(input_type, user_input, result)
+                    except OSError:
+                        st.warning("The scan report could not be saved to history.")
 
-                    st.success(
-                        "✅ URL Risk: LOW"
-                    )
-
-                reasons = url_result.get(
-                    "reasons",
-                    []
-                )
-
-                if reasons:
-
-                    st.write(
-                        "**URL Risk Indicators:**"
-                    )
-
-                    for reason in reasons:
-                        st.warning(reason)
-
-        # ----------------------------------------------------
-        # COMBINED SMS + URL RISK
-        # ----------------------------------------------------
-
-        combined_risk = result.get(
-            "combined_risk",
-            {}
-        )
-
-        if combined_risk:
-
-            st.subheader(
-                "🛡️ Combined SMS + URL Risk"
-            )
-
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-
-                st.metric(
-                    "Combined Score",
-                    f"{combined_risk.get('risk_score', 0)}/100"
-                )
-
-            with col2:
-
-                st.metric(
-                    "Combined Risk",
-                    combined_risk.get(
-                        "risk_level",
-                        "LOW"
-                    )
-                )
-
-            with col3:
-
-                st.metric(
-                    "Suspicious URLs",
-                    combined_risk.get(
-                        "suspicious_url_count",
-                        0
-                    )
-                )
-
-            base_score = combined_risk.get(
-                "base_score",
-                0
-            )
-
-            multi_url_bonus = combined_risk.get(
-                "multi_url_bonus",
-                0
-            )
-
-            st.caption(
-                f"Base risk: {base_score}/100 | "
-                f"Multi-URL bonus: +{multi_url_bonus}"
-            )
-
-    # --------------------------------------------------------
-    # URL DETAILS
-    # --------------------------------------------------------
-
-    if result_input_type == "URL":
-
-        hostname = result.get(
-            "hostname"
-        )
-
-        if hostname:
-
-            st.subheader(
-                "🌐 URL Details"
-            )
-
-            st.write(
-                "**Hostname:**",
-                hostname
-            )
-
-    # --------------------------------------------------------
-    # RECOMMENDATION
-    # --------------------------------------------------------
-
-    st.subheader(
-        "🛡️ Recommendation"
-    )
-
-    recommendation = display_result[
-        "recommendation"
-    ]
-
-    if risk_level == "HIGH":
-
-        st.error(recommendation)
-
-    elif risk_level == "MEDIUM":
-
-        st.warning(recommendation)
-
-    else:
-
-        st.info(recommendation)
+    if st.session_state.last_result is not None:
+        render_scan_result(st.session_state.last_result, input_type)
 
 
+# ============================================================
 # ANALYTICS
 
 # ============================================================

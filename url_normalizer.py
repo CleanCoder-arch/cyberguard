@@ -1,147 +1,103 @@
-from urllib.parse import urlparse, urlunparse
+import re
+from ipaddress import IPv4Address, IPv6Address
+from urllib.parse import urlsplit
 
 
-# ============================================================
-# CYBERGUARD URL NORMALIZER
-# ============================================================
+SCHEME_PREFIX = re.compile(r"^([a-z][a-z0-9+.-]*):", re.IGNORECASE | re.ASCII)
+HOST_WITH_PORT = re.compile(r"(\[[^\[\]]+\]|[^:\[\]]+)(?::([0-9]+))?")
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.IGNORECASE | re.ASCII)
 
-def normalize_url(url):
-    """
-    Normalize a URL while preserving security-relevant information.
 
-    Important:
-    - Explicit HTTP/HTTPS schemes are preserved.
-    - If no scheme is provided, HTTP is used only as a
-      parsing placeholder.
-    - Hostname is converted to lowercase.
-    - Trailing punctuation is removed.
-    """
+class URLValidationError(ValueError):
+    """The supplied text cannot be scanned as an HTTP or HTTPS URL."""
 
-    if url is None:
-        raise ValueError("URL cannot be None")
 
-    url = str(url).strip()
-
-    if not url:
-        raise ValueError("URL cannot be empty")
-
-    # --------------------------------------------------------
-    # Remove surrounding quotes
-    # --------------------------------------------------------
-
-    url = url.strip("\"'")
-
-    # --------------------------------------------------------
-    # Remove common sentence punctuation
-    # --------------------------------------------------------
-
-    while url and url[-1] in ".,;:!?)]}>":
-        url = url[:-1]
-
-    if not url:
-        raise ValueError("URL became empty after normalization")
-
-    # --------------------------------------------------------
-    # Detect whether the user explicitly provided a scheme
-    # --------------------------------------------------------
-
-    parsed_initial = urlparse(url)
-
-    has_explicit_scheme = parsed_initial.scheme.lower() in (
-        "http",
-        "https"
-    )
-
-    # --------------------------------------------------------
-    # Add HTTP only as a parsing placeholder
-    # --------------------------------------------------------
-
-    if not has_explicit_scheme:
-
-        url_for_parsing = "http://" + url
-
-    else:
-
-        url_for_parsing = url
-
-    # --------------------------------------------------------
-    # Parse URL
-    # --------------------------------------------------------
-
-    parsed = urlparse(url_for_parsing)
-
-    scheme = parsed.scheme.lower()
-
-    if scheme not in ("http", "https"):
-
-        raise ValueError(
-            f"Unsupported URL scheme: {parsed.scheme}"
-        )
-
-    # --------------------------------------------------------
-    # Validate hostname
-    # --------------------------------------------------------
-
-    hostname = parsed.hostname
-
-    if not hostname:
-
-        raise ValueError(
-            "Invalid URL: hostname could not be determined"
-        )
-
-    hostname = hostname.lower()
-
-    # --------------------------------------------------------
-    # Preserve userinfo if present
-    # --------------------------------------------------------
-
-    netloc = ""
-
-    if parsed.username is not None:
-
-        netloc += parsed.username
-
-        if parsed.password is not None:
-
-            netloc += ":" + parsed.password
-
-        netloc += "@"
-
-    netloc += hostname
-
-    # --------------------------------------------------------
-    # Preserve port
-    # --------------------------------------------------------
+def normalize_host(host):
+    if host.startswith("["):
+        address = host[1:-1]
+        literal, separator, zone = address.partition("%")
+        if separator and not re.fullmatch(r"25[A-Za-z0-9._~-]+", zone):
+            raise URLValidationError("Invalid URL: invalid IPv6 zone identifier.")
+        try:
+            IPv6Address(literal)
+        except ValueError as error:
+            raise URLValidationError("Invalid URL: invalid IPv6 address.") from error
+        return f"[{literal.lower()}{separator}{zone}]"
 
     try:
+        ascii_host = host.encode("idna").decode("ascii").removesuffix(".")
+    except UnicodeError as error:
+        raise URLValidationError("Invalid URL: invalid hostname.") from error
 
-        if parsed.port is not None:
+    labels = ascii_host.split(".")
+    if len(ascii_host) > 253 or any(not DNS_LABEL.fullmatch(label) for label in labels):
+        raise URLValidationError("Invalid URL: invalid hostname.")
 
-            netloc += ":" + str(parsed.port)
+    # A trailing numeric DNS label would be parsed as an IPv4 address by browsers.
+    if labels[-1].isdigit() or re.fullmatch(r"0x[0-9a-f]+", labels[-1], re.IGNORECASE):
+        try:
+            IPv4Address(ascii_host)
+        except ValueError as error:
+            raise URLValidationError("Invalid URL: invalid IPv4 address.") from error
+    return host.lower()
 
-    except ValueError:
 
-        raise ValueError(
-            "Invalid URL: invalid port"
-        )
+def normalize_url(url):
+    """Validate a URL and return the model input and whether its scheme was supplied."""
+    if url is None:
+        raise URLValidationError("URL cannot be None.")
 
-    # --------------------------------------------------------
-    # Reconstruct normalized URL
-    # --------------------------------------------------------
+    url = str(url).strip()
+    if len(url) >= 2 and url[0] in "\"'" and url[-1] == url[0]:
+        url = url[1:-1]
+    if not url:
+        raise URLValidationError("URL cannot be empty.")
+    if any(char.isspace() or not char.isprintable() or char == "\\" for char in url):
+        raise URLValidationError("Invalid URL: whitespace, controls and backslashes are not allowed.")
 
-    normalized = urlunparse(
-        (
-            scheme,
-            netloc,
-            parsed.path,
-            parsed.params,
-            parsed.query,
-            parsed.fragment
-        )
-    )
+    # A dotted hostname or localhost can be supplied with a port and no scheme.
+    # Other single-label hosts with ports need an explicit scheme or leading "//".
+    match = SCHEME_PREFIX.match(url)
+    explicit_scheme = False
+    if match:
+        scheme = match[1].lower()
+        remainder = url[match.end():]
+        if scheme in {"http", "https"}:
+            if not remainder.startswith("//"):
+                raise URLValidationError("Invalid URL: HTTP and HTTPS require '://'.")
+            explicit_scheme = True
+        elif remainder.startswith("//") or ("." not in scheme and scheme != "localhost"):
+            raise URLValidationError(f"Unsupported URL scheme: {scheme}.")
 
-    return normalized, has_explicit_scheme
+    if not explicit_scheme:
+        url = "http://" + url.removeprefix("//")
+
+    try:
+        parsed = urlsplit(url)
+    except ValueError as error:
+        raise URLValidationError("Invalid URL: invalid hostname or IPv6 address.") from error
+
+    userinfo, separator, authority = parsed.netloc.rpartition("@")
+    if separator and (not explicit_scheme or "@" in userinfo):
+        raise URLValidationError("Invalid URL: invalid user information in the hostname.")
+
+    authority_match = HOST_WITH_PORT.fullmatch(authority)
+    if authority_match is None:
+        raise URLValidationError("Invalid URL: invalid hostname or port. Enclose IPv6 addresses in brackets.")
+
+    host, port = authority_match.groups()
+    host = normalize_host(host)
+
+    # Retain port normalization used by the fitted model.
+    if port is not None:
+        port_digits = port.lstrip("0") or "0"
+        if len(port_digits) > 5 or not 1 <= int(port_digits) <= 65535:
+            raise URLValidationError("Invalid URL: port must be between 1 and 65535.")
+        host += ":" + port_digits
+
+    # Preserve the spelling of the path, query and fragment, including delimiters.
+    authority_end = url.index("://") + 3 + len(parsed.netloc)
+    return f"{parsed.scheme}://{userinfo}{separator}{host}{url[authority_end:]}", explicit_scheme
 
 
 # ============================================================

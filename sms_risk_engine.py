@@ -1,5 +1,7 @@
 import re
 
+from sms_url_extractor import extract_urls
+
 
 # ============================================================
 # CYBERGUARD SMS RISK ANALYSIS ENGINE
@@ -86,22 +88,24 @@ PRIZE_KEYWORDS = {
 
 
 def detect_urls(message):
-    """
-    Detect URLs inside a message.
-    """
+    """Return the shared list of web link candidates."""
+    return extract_urls(message)
 
-    pattern = r"(https?://\S+|www\.\S+|\b[a-zA-Z0-9-]+\.(com|in|org|net|xyz|co|info|site)\b)"
 
-    return re.findall(
-        pattern,
-        message,
-        flags=re.IGNORECASE
-    )
+def _matched_keywords(text, keywords):
+    matched = []
+    for keyword in keywords:
+        phrase = r"\s+".join(re.escape(word) for word in keyword.split())
+        if re.search(r"\b" + phrase + r"\b", text):
+            matched.append(keyword)
+    return matched
 
 
 def analyze_message_risk(
     message,
-    phishing_probability
+    phishing_probability,
+    *,
+    detected_urls=None,
 ):
     """
     Analyze an SMS/message using ML probability
@@ -159,11 +163,7 @@ def analyze_message_risk(
     # 2. URGENCY
     # --------------------------------------------------------
 
-    matched_urgency = [
-        word
-        for word in URGENCY_KEYWORDS
-        if word in text
-    ]
+    matched_urgency = _matched_keywords(text, URGENCY_KEYWORDS)
 
     if matched_urgency:
 
@@ -183,11 +183,7 @@ def analyze_message_risk(
     # 3. ACCOUNT / SECURITY
     # --------------------------------------------------------
 
-    matched_account = [
-        word
-        for word in ACCOUNT_KEYWORDS
-        if word in text
-    ]
+    matched_account = _matched_keywords(text, ACCOUNT_KEYWORDS)
 
     if matched_account:
 
@@ -207,11 +203,7 @@ def analyze_message_risk(
     # 4. CREDENTIAL REQUEST
     # --------------------------------------------------------
 
-    matched_credentials = [
-        word
-        for word in CREDENTIAL_KEYWORDS
-        if word in text
-    ]
+    matched_credentials = _matched_keywords(text, CREDENTIAL_KEYWORDS)
 
     if matched_credentials:
 
@@ -231,11 +223,7 @@ def analyze_message_risk(
     # 5. FINANCIAL LANGUAGE
     # --------------------------------------------------------
 
-    matched_financial = [
-        word
-        for word in FINANCIAL_KEYWORDS
-        if word in text
-    ]
+    matched_financial = _matched_keywords(text, FINANCIAL_KEYWORDS)
 
     if matched_financial:
 
@@ -255,11 +243,7 @@ def analyze_message_risk(
     # 6. PRIZE / REWARD LANGUAGE
     # --------------------------------------------------------
 
-    matched_prize = [
-        word
-        for word in PRIZE_KEYWORDS
-        if word in text
-    ]
+    matched_prize = _matched_keywords(text, PRIZE_KEYWORDS)
 
     if matched_prize:
 
@@ -279,9 +263,7 @@ def analyze_message_risk(
     # 7. URL / LINK
     # --------------------------------------------------------
 
-    urls = detect_urls(
-        message
-    )
+    urls = detect_urls(message) if detected_urls is None else detected_urls
 
     if urls:
 

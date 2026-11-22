@@ -1,8 +1,10 @@
 
 import unittest
+from unittest.mock import patch
 
 from cyberguard_url import analyze_url
 from cyberguard_sms import analyze_sms
+from detector_models import DetectorUnavailableError
 from sms_url_extractor import extract_urls
 from cyberguard import analyze_input
 
@@ -80,6 +82,29 @@ class TestCyberGuard(unittest.TestCase):
 
         self.assertEqual(urls, [])
 
+    def test_sms_scoring_and_link_checks_share_one_extraction(self):
+        first = "https://example.com/Case?key=ABC"
+        second = "https://example.com/Case?key=abc"
+        message = f"See {first}, {first}, or {second}. Email me@sub.example.com."
+
+        with patch("cyberguard.extract_urls", wraps=extract_urls) as extractor:
+            result = analyze_input("SMS", message)
+
+        extractor.assert_called_once_with(message)
+        self.assertEqual(result["detected_urls"], [first, second])
+        self.assertEqual(result["sms_result"]["detected_urls"], [first, second])
+        self.assertEqual([link["url"] for link in result["url_results"]], [first, second])
+
+    def test_malformed_embedded_url_leaves_scan_incomplete(self):
+        invalid = "https://example.com:70000/"
+        result = analyze_input("SMS", f"See https://example.com/ and {invalid}")
+
+        self.assertIsNotNone(result["sms_result"])
+        self.assertEqual(result["url_results"][0]["hostname"], "example.com")
+        self.assertEqual(result["url_results"][1]["url"], invalid)
+        self.assertIn("port", result["url_results"][1]["error"].lower())
+        self.assertIsNone(result["combined_risk"])
+
     def test_normal_sms_combined_analysis(self):
         result = analyze_input(
             "SMS",
@@ -111,6 +136,61 @@ class TestCyberGuard(unittest.TestCase):
         self.assertEqual(
             combined["risk_level"], "HIGH"
         )
+
+
+class TestUnavailableDetectors(unittest.TestCase):
+
+    def test_missing_sms_model_preserves_url_checks(self):
+        with patch("cyberguard_sms.MODEL_PATH", "models/missing_sms_model.joblib"):
+            url = "https://www.wikipedia.org"
+            direct_result = analyze_input("URL", url)
+            result = analyze_input("SMS", f"See {url}")
+
+        self.assertIsNone(result["sms_result"])
+        self.assertIn("SMS detector is unavailable", result["sms_error"])
+        self.assertEqual(result["url_results"], [direct_result])
+        self.assertIsNone(result["combined_risk"])
+
+    def test_missing_url_model_preserves_sms_checks(self):
+        with patch("cyberguard_url.MODEL_PATH", "models/missing_url_model.joblib"):
+            with self.assertRaisesRegex(
+                DetectorUnavailableError, "URL detector is unavailable"
+            ):
+                analyze_input("URL", "https://www.wikipedia.org")
+            linked_sms = analyze_input("SMS", "See https://www.wikipedia.org")
+            plain_sms = analyze_input("SMS", "See you tomorrow")
+
+        self.assertIsNotNone(linked_sms["sms_result"])
+        self.assertIn(
+            "URL detector is unavailable", linked_sms["url_results"][0]["error"]
+        )
+        self.assertIsNone(linked_sms["combined_risk"])
+        self.assertIsNotNone(plain_sms["combined_risk"])
+
+    def test_one_failed_link_withholds_overall_risk(self):
+        successful_url = "https://www.wikipedia.org"
+        failed_url = "https://www.example.com"
+        successful_result = analyze_url(successful_url)
+        with patch(
+            "cyberguard.analyze_url",
+            side_effect=[successful_result, ValueError("Check failed")],
+        ):
+            result = analyze_input("SMS", f"See {successful_url} or {failed_url}")
+
+        self.assertIsNotNone(result["sms_result"])
+        self.assertEqual(result["url_results"], [
+            successful_result,
+            {"url": failed_url, "error": "Check failed"},
+        ])
+        self.assertIsNone(result["combined_risk"])
+
+    def test_failed_link_extraction_preserves_sms_check(self):
+        with patch("cyberguard.extract_urls", side_effect=ValueError("Extraction failed")):
+            result = analyze_input("SMS", "See https://www.wikipedia.org")
+
+        self.assertIn("risk_score", result["sms_result"])
+        self.assertEqual(result["url_extraction_error"], "Extraction failed")
+        self.assertIsNone(result["combined_risk"])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 from urllib.parse import urlparse, parse_qs, unquote
+from ipaddress import ip_address
 import re
 
 
@@ -68,15 +69,15 @@ def get_hostname(url):
 
         value = str(url).strip()
 
-        if not value.startswith(("http://", "https://")):
-            value = "http://" + value
+        if not value.lower().startswith(("http://", "https://")):
+            value = "http://" + value.removeprefix("//")
 
         parsed = urlparse(value)
 
         hostname = parsed.hostname
 
         if hostname:
-            return hostname.lower()
+            return hostname
 
         return ""
 
@@ -225,7 +226,7 @@ def detect_nested_urls(url):
 # MAIN RISK ANALYSIS
 # ============================================================
 
-def analyze_risk(url, malicious_probability, features):
+def analyze_risk(url, malicious_probability, features, *, scheme=None):
     """
     Generate a transparent CyberGuard risk assessment.
 
@@ -238,6 +239,10 @@ def analyze_risk(url, malicious_probability, features):
 
         features:
             Dictionary returned by extract_features().
+
+        scheme:
+            The supplied URL scheme or "unknown" for a scheme-less URL
+            normalized with an HTTP placeholder for the model.
     """
 
     score = 0
@@ -246,7 +251,18 @@ def analyze_risk(url, malicious_probability, features):
     positive_signals = []
 
     hostname = get_hostname(url)
-    root_domain = get_root_domain(hostname)
+    try:
+        ip_address(hostname.removesuffix("."))
+        is_ip_address = True
+    except ValueError:
+        is_ip_address = False
+    root_domain = "" if is_ip_address else get_root_domain(hostname)
+    if scheme is None:
+        value = str(url).strip().lower()
+        scheme = next(
+            (name for name in ("http", "https") if value.startswith(name + "://")),
+            "unknown",
+        )
 
     # --------------------------------------------------------
     # 1. ML SIGNAL
@@ -286,13 +302,13 @@ def analyze_risk(url, malicious_probability, features):
     # 2. HTTPS
     # --------------------------------------------------------
 
-    if features.get("https", 0) == 1:
+    if scheme == "https":
 
         positive_signals.append(
             "URL uses HTTPS."
         )
 
-    else:
+    elif scheme == "http":
 
         score += 10
 
@@ -304,7 +320,7 @@ def analyze_risk(url, malicious_probability, features):
     # 3. IP ADDRESS
     # --------------------------------------------------------
 
-    if features.get("has_ip", 0) == 1:
+    if is_ip_address:
 
         score += 25
 
@@ -316,9 +332,9 @@ def analyze_risk(url, malicious_probability, features):
     # 4. SUSPICIOUS TLD
     # --------------------------------------------------------
 
-    if hostname:
+    if hostname and not is_ip_address:
 
-        tld = "." + hostname.split(".")[-1]
+        tld = "." + hostname.removesuffix(".").split(".")[-1]
 
         if tld in SUSPICIOUS_TLDS:
 
@@ -473,9 +489,7 @@ def analyze_risk(url, malicious_probability, features):
     # 13. BRAND IMPERSONATION
     # --------------------------------------------------------
 
-    impersonated_brand = detect_brand_impersonation(
-        hostname
-    )
+    impersonated_brand = None if is_ip_address else detect_brand_impersonation(hostname)
 
     if impersonated_brand:
 

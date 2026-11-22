@@ -1,8 +1,7 @@
-import joblib
 import pandas as pd
-
 from scipy.sparse import hstack, csr_matrix
 
+from detector_models import MODELS_DIR, load_artifacts
 from url_features import extract_features
 from risk_engine import analyze_risk
 from url_normalizer import normalize_url
@@ -12,24 +11,9 @@ from url_normalizer import normalize_url
 # LOAD MODELS
 # ============================================================
 
-MODEL_PATH = "models/url_hybrid_model.joblib"
-VECTORIZER_PATH = "models/url_hybrid_vectorizer.joblib"
-SCALER_PATH = "models/url_hybrid_scaler.joblib"
-
-
-print("Loading CyberGuard URL detector...")
-
-model = joblib.load(MODEL_PATH)
-
-vectorizer = joblib.load(
-    VECTORIZER_PATH
-)
-
-scaler = joblib.load(
-    SCALER_PATH
-)
-
-print("CyberGuard URL detector loaded.")
+MODEL_PATH = MODELS_DIR / "url_hybrid_model.joblib"
+VECTORIZER_PATH = MODELS_DIR / "url_hybrid_vectorizer.joblib"
+SCALER_PATH = MODELS_DIR / "url_hybrid_scaler.joblib"
 
 
 # ============================================================
@@ -42,10 +26,12 @@ def analyze_url(url):
     # 0. NORMALIZE URL
     # --------------------------------------------------------
 
+    model_url, explicit_scheme = normalize_url(url)
     original_url = str(url).strip()
-
-    normalized_url, explicit_scheme = normalize_url(
-        original_url
+    scheme = model_url.split(":", 1)[0] if explicit_scheme else "unknown"
+    display_url = model_url if explicit_scheme else model_url.removeprefix("http://")
+    model, vectorizer, scaler = load_artifacts(
+        "URL", MODEL_PATH, VECTORIZER_PATH, SCALER_PATH
     )
 
     # --------------------------------------------------------
@@ -53,7 +39,7 @@ def analyze_url(url):
     # --------------------------------------------------------
 
     tfidf_features = vectorizer.transform(
-        [normalized_url]
+        [model_url]
     )
 
     # --------------------------------------------------------
@@ -61,7 +47,7 @@ def analyze_url(url):
     # --------------------------------------------------------
 
     feature_dict = extract_features(
-        normalized_url
+        model_url
     )
 
     feature_df = pd.DataFrame(
@@ -124,9 +110,10 @@ def analyze_url(url):
     # --------------------------------------------------------
 
     risk_result = analyze_risk(
-        normalized_url,
+        model_url,
         malicious_probability,
-        feature_dict
+        feature_dict,
+        scheme=scheme
     )
 
     # --------------------------------------------------------
@@ -139,9 +126,12 @@ def analyze_url(url):
         "original_url":
             original_url,
 
-        # Normalized URL used by CyberGuard
+        # Normalized URL as supplied, without an inferred scheme
         "url":
-            normalized_url,
+            display_url,
+
+        "scheme":
+            scheme,
 
         # Whether HTTP/HTTPS was explicitly provided
         "explicit_scheme":
@@ -237,8 +227,8 @@ if __name__ == "__main__":
             )
 
             print(
-                "Explicit Scheme:",
-                result["explicit_scheme"]
+                "Scheme:",
+                result["scheme"]
             )
 
             print(

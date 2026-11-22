@@ -178,24 +178,30 @@ def analyze_input(
     elif input_type.upper() == "SMS":
 
         # ----------------------------------------------------
-        # 1. Analyze SMS itself
-        # ----------------------------------------------------
+        # 1. Extract URLs for both SMS scoring and embedded-link checks
+        # --------------------------------------------------------
 
-        sms_result = analyze_sms(
-            content
-        )
+        detected_urls = []
+        url_extraction_error = None
+        try:
+            detected_urls = extract_urls(content)
+        except Exception as error:
+            url_extraction_error = str(error) or "The link extraction check failed."
 
-        # ----------------------------------------------------
-        # 2. Extract URLs
-        # ----------------------------------------------------
+        # --------------------------------------------------------
+        # 2. Analyze the SMS, including link signals when extraction succeeds
+        # --------------------------------------------------------
 
-        detected_urls = extract_urls(
-            content
-        )
+        sms_result = None
+        sms_error = None
+        try:
+            sms_result = analyze_sms(content, detected_urls=detected_urls)
+        except Exception as error:
+            sms_error = str(error) or "The SMS check failed."
 
-        # ----------------------------------------------------
+        # --------------------------------------------------------
         # 3. Analyze every URL
-        # ----------------------------------------------------
+        # --------------------------------------------------------
 
         url_results = []
 
@@ -211,13 +217,13 @@ def analyze_input(
                     url_result
                 )
 
-            except Exception as e:
+            except Exception as error:
 
                 url_results.append({
 
                     "url": url,
 
-                    "error": str(e)
+                    "error": str(error) or "The URL check failed."
 
                 })
 
@@ -225,22 +231,19 @@ def analyze_input(
         # 4. Calculate combined risk
         # ----------------------------------------------------
 
-        valid_url_results = [
-            result
-            for result in url_results
-            if "error" not in result
-        ]
-
-        combined_result = calculate_combined_risk(
-            sms_result,
-            valid_url_results
-        )
+        combined_result = None
+        if (
+            sms_result is not None
+            and url_extraction_error is None
+            and all("error" not in result for result in url_results)
+        ):
+            combined_result = calculate_combined_risk(sms_result, url_results)
 
         # ----------------------------------------------------
-        # 5. Return complete result
+        # 5. Return the available results
         # ----------------------------------------------------
 
-        return {
+        result = {
 
             "input_type": "SMS",
 
@@ -255,6 +258,11 @@ def analyze_input(
             "combined_risk": combined_result
 
         }
+        if sms_error is not None:
+            result["sms_error"] = sms_error
+        if url_extraction_error is not None:
+            result["url_extraction_error"] = url_extraction_error
+        return result
 
     # ========================================================
     # INVALID TYPE
@@ -272,6 +280,19 @@ def analyze_input(
 # ============================================================
 
 if __name__ == "__main__":
+
+    def print_combined_risk(result):
+        if "sms_error" in result:
+            print("SMS check:", result["sms_error"])
+        if "url_extraction_error" in result:
+            print("Link extraction:", result["url_extraction_error"])
+        combined_risk = result["combined_risk"]
+        if combined_risk is None:
+            print("Overall risk unavailable because a check failed.")
+            return
+        print("Combined Risk:", combined_risk["risk_score"])
+        print("Combined Risk Level:", combined_risk["risk_level"])
+        print("Recommendation:", combined_risk["recommendation"])
 
     print("\n" + "=" * 70)
     print("CYBERGUARD COMBINED ANALYZER")
@@ -306,15 +327,7 @@ if __name__ == "__main__":
         result["detected_urls"]
     )
 
-    print(
-        "Combined Risk:",
-        result["combined_risk"]["risk_score"]
-    )
-
-    print(
-        "Risk Level:",
-        result["combined_risk"]["risk_level"]
-    )
+    print_combined_risk(result)
 
 
     # --------------------------------------------------------
@@ -383,20 +396,7 @@ if __name__ == "__main__":
         )
 
 
-    print(
-        "\nCombined Risk:",
-        result["combined_risk"]["risk_score"]
-    )
-
-    print(
-        "Combined Risk Level:",
-        result["combined_risk"]["risk_level"]
-    )
-
-    print(
-        "Recommendation:",
-        result["combined_risk"]["recommendation"]
-    )
+    print_combined_risk(result)
 
 
     # --------------------------------------------------------
@@ -439,6 +439,10 @@ if __name__ == "__main__":
             url_result["url"]
         )
 
+        if "error" in url_result:
+            print("ERROR:", url_result["error"])
+            continue
+
         print(
             "Risk Score:",
             url_result["risk_score"]
@@ -449,15 +453,7 @@ if __name__ == "__main__":
             url_result["risk_level"]
         )
 
-    print(
-        "\nCombined Risk:",
-        result["combined_risk"]["risk_score"]
-    )
-
-    print(
-        "Combined Risk Level:",
-        result["combined_risk"]["risk_level"]
-    )
+    print_combined_risk(result)
 
 
     print("\n" + "=" * 70)

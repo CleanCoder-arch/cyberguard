@@ -1,5 +1,4 @@
-import joblib
-
+from detector_models import MODELS_DIR, load_artifacts
 from sms_risk_engine import analyze_message_risk
 
 
@@ -7,30 +6,18 @@ from sms_risk_engine import analyze_message_risk
 # LOAD SMS MODEL
 # ============================================================
 
-MODEL_PATH = "models/sms_model.joblib"
-VECTORIZER_PATH = "models/sms_vectorizer.joblib"
-
-
-print("Loading CyberGuard SMS detector...")
-
-model = joblib.load(
-    MODEL_PATH
-)
-
-vectorizer = joblib.load(
-    VECTORIZER_PATH
-)
-
-print("CyberGuard SMS detector loaded.")
+MODEL_PATH = MODELS_DIR / "sms_model.joblib"
+VECTORIZER_PATH = MODELS_DIR / "sms_vectorizer.joblib"
 
 
 # ============================================================
 # UNIFIED SMS ANALYZER
 # ============================================================
 
-def analyze_sms(message):
+def analyze_sms(message, *, detected_urls=None):
 
     message = str(message).strip()
+    model, vectorizer = load_artifacts("SMS", MODEL_PATH, VECTORIZER_PATH)
 
 
     # --------------------------------------------------------
@@ -80,7 +67,8 @@ def analyze_sms(message):
 
     risk_result = analyze_message_risk(
         message,
-        phishing_probability
+        phishing_probability,
+        detected_urls=detected_urls,
     )
 
 

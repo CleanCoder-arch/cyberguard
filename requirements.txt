@@ -4,3 +4,4 @@ numpy==2.2.6
 scikit-learn==1.7.2
 joblib==1.6.0
 scipy==1.15.3
+tldextract==5.3.2

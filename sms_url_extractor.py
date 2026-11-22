@@ -1,232 +1,93 @@
 import re
 
 
-# ============================================================
-# CYBERGUARD SMS URL EXTRACTOR
-# ============================================================
+_SCHEME = r"(?ai:[a-z][a-z0-9+.-]*://)"
+_URL_TAIL = r"""[^\s<>{}"']*"""
+_DOMAIN = r"(?ai:(?:[a-z0-9-]+\.)+(?:xn--[a-z0-9-]+|[a-z]{2,}))"
+_IP_LITERAL = r"(?:[0-9]+\.){3}[0-9]+|\[(?ai:[0-9a-f.]*):[^\s\[\]<>]*\]"
+_BARE_HOST = rf"(?:{_DOMAIN}|{_IP_LITERAL})(?![\w@+%-]|\.[\w.-])"
+_BARE_PORT = r"""(?::[^\s/?#()<>\[\]{}"',;!]*)?"""
+_BARE_AUTHORITY = rf"(?<![\w@.+%-]){_BARE_HOST}{_BARE_PORT}"
+_EMAIL_ATOM = r"""[\w.!#$%&'*+=^_`{|}~/-]"""
+_EMAIL_LOCAL = rf"""(?:{_EMAIL_ATOM}+|"[^"\r\n]+")"""
+_EMAIL_DOMAIN = r"(?:[\w-]+(?:\.[\w-]+)+|\[[^\s\[\]]+\])"
 
-
-# Explicit HTTP / HTTPS URLs
-HTTP_URL_PATTERN = re.compile(
-    r"(?i)\bhttps?://[^\s<>\[\]{}\"']+"
+# Consume email addresses as a whole so neither the local part nor a
+# subdomain of the address can be mistaken for a standalone link.
+_CANDIDATE = re.compile(
+    rf"(?P<explicit>(?<![\w@]){_SCHEME}{_URL_TAIL})"
+    rf"|(?P<bare_with_suffix>{_BARE_AUTHORITY}[/?#]{_URL_TAIL})"
+    rf"|(?<!{_EMAIL_ATOM})(?ai:mailto:)?{_EMAIL_LOCAL}@{_EMAIL_DOMAIN}"
+    rf"|(?P<bare>{_BARE_AUTHORITY})"
 )
+_URL_PARTS = re.compile(rf"^({_SCHEME})?([^/?#]*)(.*)$")
+_URL_WRAPPERS = {"<": ">", '"': '"', "'": "'"}
 
 
-# WWW URLs
-WWW_URL_PATTERN = re.compile(
-    r"(?i)(?<![@\w])www\.[a-z0-9-]+(?:\.[a-z0-9-]+)+"
-    r"(?:/[^\s<>\[\]{}\"']*)?"
-)
+def clean_extracted_url(url, opener=None):
+    """Remove common sentence delimiters, keeping balanced URL brackets."""
+    url = url.rstrip(".,")
+    closing_pairs = {")": "("}
+    if opener == "[":
+        closing_pairs["]"] = "["
+
+    if url and url[-1] in closing_pairs:
+        unmatched = {
+            close: url.count(close) - url.count(opening)
+            for close, opening in closing_pairs.items()
+        }
+        end = len(url)
+        while end and unmatched.get(url[end - 1], 0) > 0:
+            unmatched[url[end - 1]] -= 1
+            end -= 1
+        url = url[:end]
+    scheme, authority, suffix = _URL_PARTS.fullmatch(url).groups()
+    if not suffix:
+        # With no path or query, these characters are sentence punctuation.
+        authority = authority.rstrip("!;")
+    return (scheme or "") + authority + suffix
 
 
-# Bare domain URLs
-BARE_DOMAIN_PATTERN = re.compile(
-    r"(?i)(?<![@\w])"
-    r"(?:[a-z0-9-]+\.)+"
-    r"[a-z]{2,}"
-    r"(?:/[^\s<>\[\]{}\"']*)?"
-)
+def _duplicate_key(url):
+    """Fold case only in the scheme and the hostname."""
+    scheme, authority, suffix = _URL_PARTS.fullmatch(url).groups()
+    userinfo, separator, host_and_port = authority.rpartition("@")
+    if host_and_port.startswith("[") and "]" in host_and_port:
+        host, closer, port = host_and_port.partition("]")
+        address, zone_separator, zone = host.partition("%")
+        host_and_port = address.lower() + zone_separator + zone + closer + port
+    else:
+        host, colon, port = host_and_port.partition(":")
+        host_and_port = host.lower() + colon + port
+    return (scheme or "").lower(), userinfo, separator, host_and_port, suffix
 
-
-# ============================================================
-# CLEAN URL
-# ============================================================
-
-def clean_extracted_url(url):
-    """
-    Remove punctuation commonly surrounding URLs in SMS.
-    """
-
-    url = url.strip()
-
-    # Opening punctuation
-    url = url.lstrip(
-        "([{<\"'"
-    )
-
-    # Ending punctuation
-    while url and url[-1] in ".,!?;:)]}>\"'":
-
-        url = url[:-1]
-
-    return url
-
-
-# ============================================================
-# VALIDATE URL
-# ============================================================
-
-def is_valid_url_candidate(url):
-    """
-    Basic validation for extracted URL candidates.
-    """
-
-    if not url:
-        return False
-
-    value = url.lower()
-
-    # Explicit URL
-    if value.startswith(
-        ("http://", "https://")
-    ):
-        return True
-
-    # WWW URL
-    if value.startswith("www."):
-        return True
-
-    # Bare domain
-    if "." not in value:
-        return False
-
-    # Don't treat email addresses as URLs
-    if "@" in value:
-        return False
-
-    return True
-
-
-# ============================================================
-# EXTRACT URLS
-# ============================================================
 
 def extract_urls(text):
-    """
-    Extract URLs from an SMS.
-
-    Supports:
-
-        http://example.com
-        https://example.com
-        www.example.com
-        example.com
-
-    Removes duplicate matches caused by overlapping
-    URL patterns.
-    """
-
+    """Return distinct web link candidates in their order of appearance."""
     if text is None:
         return []
 
     text = str(text)
-
-    candidates = []
-
-    # --------------------------------------------------------
-    # 1. Extract HTTP / HTTPS URLs
-    # --------------------------------------------------------
-
-    http_matches = list(
-        HTTP_URL_PATTERN.finditer(text)
-    )
-
-    for match in http_matches:
-
-        candidates.append(
-            match.group()
-        )
-
-    # --------------------------------------------------------
-    # 2. Extract WWW URLs
-    # --------------------------------------------------------
-
-    www_matches = list(
-        WWW_URL_PATTERN.finditer(text)
-    )
-
-    for match in www_matches:
-
-        # Skip if this match is inside an HTTP/HTTPS URL
-        overlaps_http = any(
-            match.start() >= http.start()
-            and match.end() <= http.end()
-            for http in http_matches
-        )
-
-        if not overlaps_http:
-
-            candidates.append(
-                match.group()
-            )
-
-    # --------------------------------------------------------
-    # 3. Extract bare domains
-    # --------------------------------------------------------
-
-    bare_matches = list(
-        BARE_DOMAIN_PATTERN.finditer(text)
-    )
-
-    for match in bare_matches:
-
-        # Skip if bare-domain match is inside an
-        # HTTP/HTTPS URL.
-        overlaps_http = any(
-            match.start() >= http.start()
-            and match.end() <= http.end()
-            for http in http_matches
-        )
-
-        if overlaps_http:
-            continue
-
-        # Skip if it is inside a WWW URL.
-        overlaps_www = any(
-            match.start() >= www.start()
-            and match.end() <= www.end()
-            for www in www_matches
-        )
-
-        if overlaps_www:
-            continue
-
-        candidates.append(
-            match.group()
-        )
-
-    # --------------------------------------------------------
-    # 4. Clean candidates
-    # --------------------------------------------------------
-
-    cleaned_urls = []
-
-    for candidate in candidates:
-
-        url = clean_extracted_url(
-            candidate
-        )
-
-        if not is_valid_url_candidate(
-            url
-        ):
-            continue
-
-        cleaned_urls.append(
-            url
-        )
-
-    # --------------------------------------------------------
-    # 5. Remove duplicates
-    # --------------------------------------------------------
-
-    unique_urls = []
-
     seen = set()
+    urls = []
+    for match in _CANDIDATE.finditer(text):
+        candidate = (
+            match.group("explicit") or match.group("bare_with_suffix") or match.group("bare")
+        )
+        if candidate is None:
+            continue
 
-    for url in cleaned_urls:
-
-        key = url.lower()
-
+        start, end = match.span()
+        opener = text[start - 1] if start else None
+        if _URL_WRAPPERS.get(opener) == text[end:end + 1]:
+            url = candidate
+        else:
+            url = clean_extracted_url(candidate, opener)
+        key = _duplicate_key(url)
         if key not in seen:
-
             seen.add(key)
-
-            unique_urls.append(
-                url
-            )
-
-    return unique_urls
+            urls.append(url)
+    return urls
 
 
 # ============================================================
