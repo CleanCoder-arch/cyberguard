@@ -1,6 +1,8 @@
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -140,6 +142,12 @@ class TestScannerApp(unittest.TestCase):
         labels = [button.label for button in self.app.download_button]
         self.assertEqual(labels, ["Download summary"] if visible else [])
 
+    def assert_feedback_visible(self, visible):
+        labels = [button.label for button in self.app.main.button if button.label in {"Yes", "No"}]
+        self.assertEqual(labels, ["Yes", "No"] if visible else [])
+        prompt_visible = any("Was this result helpful?" in element.value for element in self.app.markdown)
+        self.assertEqual(prompt_visible, visible)
+
     def report_html(self):
         return "\n".join(item.proto.body for item in self.app.get("html"))
 
@@ -238,6 +246,43 @@ class TestScannerApp(unittest.TestCase):
         self.assert_report_visible(False)
         self.select_page("Scanner")
         self.assert_report_visible(False)
+
+    def test_repeated_feedback_clicks_replace_only_the_current_scan_response(self):
+        url = "https://example.com"
+        self.assert_feedback_visible(False)
+        self.scan_url(url)
+        self.assert_feedback_visible(True)
+        report = self.report_html()
+
+        with closing(sqlite3.connect(HISTORY_PATH)) as database:
+            (scan_id,), = database.execute("SELECT id FROM scans")
+            self.assertEqual(database.execute("SELECT * FROM scan_feedback").fetchall(), [])
+            for label in ("Yes", "Yes", "No"):
+                with self.subTest(label=label):
+                    self.click_scanner_button(label)
+                    self.assert_report_visible(True)
+                    (saved_id, response, timestamp), = database.execute(
+                        "SELECT scan_id, response, timestamp FROM scan_feedback"
+                    )
+                    self.assertEqual((saved_id, response), (scan_id, label.lower()))
+                    self.assertEqual(datetime.fromisoformat(timestamp).tzinfo, timezone.utc)
+
+            self.assertEqual(self.report_html(), report)
+            self.analyze_input.assert_called_once_with("URL", url)
+            self.assertEqual(database.execute("SELECT id FROM scans").fetchall(), [(scan_id,)])
+
+            self.click_scanner_button("Analyze URL")
+            self.assert_feedback_visible(True)
+            (new_scan_id,), = database.execute("SELECT id FROM scans WHERE id != ?", (scan_id,))
+            self.assertEqual(
+                database.execute("SELECT scan_id, response FROM scan_feedback").fetchall(), [(scan_id, "no")]
+            )
+            self.click_scanner_button("Yes")
+            self.assertEqual(
+                database.execute("SELECT scan_id, response FROM scan_feedback ORDER BY scan_id").fetchall(),
+                [(scan_id, "no"), (new_scan_id, "yes")],
+            )
+            self.assertEqual(self.analyze_input.call_count, 2)
 
     def test_url_sample_loads_input_and_report_controls_follow_analysis(self):
         self.analyze_input.return_value = EXPLAINED_URL_RESULT
@@ -420,6 +465,7 @@ class TestScannerApp(unittest.TestCase):
         self.click_scanner_button("Analyze Message")
 
         self.assert_report_visible(True)
+        self.assert_feedback_visible(False)
         metrics = {metric.label: metric.value for metric in self.app.metric}
         self.assertEqual(metrics["SMS Risk Score"], "40/100")
         self.assertEqual(metrics["URL Risk"], "10/100")
@@ -538,6 +584,7 @@ class TestScannerApp(unittest.TestCase):
         self.click_scanner_button("Analyze URL")
 
         self.assert_report_visible(False)
+        self.assert_feedback_visible(False)
         self.assertTrue(self.app.error)
 
     def test_url_report_displays_unknown_scheme_and_validation_error(self):

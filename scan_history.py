@@ -35,9 +35,22 @@ CREATE TABLE IF NOT EXISTS legacy_imports (
     PRIMARY KEY (metadata_hash, occurrence)
 )
 """
+_CREATE_FEEDBACK = """
+CREATE TABLE IF NOT EXISTS scan_feedback (
+    scan_id INTEGER PRIMARY KEY REFERENCES scans (id) ON DELETE CASCADE,
+    response TEXT NOT NULL CHECK (response IN ('yes', 'no')),
+    timestamp TEXT NOT NULL
+)
+"""
 _INSERT_SCAN = """
 INSERT INTO scans (timestamp, input_type, scan_status, risk_level, latency_ms, feed_freshness)
 VALUES (?, ?, ?, ?, ?, ?)
+"""
+_UPSERT_FEEDBACK = """
+INSERT INTO scan_feedback (scan_id, response, timestamp)
+SELECT id, ?, ? FROM scans
+WHERE id = ? AND timestamp = ? AND scan_status = 'completed'
+ON CONFLICT (scan_id) DO UPDATE SET response = excluded.response, timestamp = excluded.timestamp
 """
 
 
@@ -48,7 +61,7 @@ def _utc_timestamp(timestamp):
 
 
 class ScanHistory:
-    """Store only scan metadata in a local SQLite database."""
+    """Store scan metadata and feedback in a local SQLite database."""
 
     def __init__(self, path):
         self.path = Path(path)
@@ -57,8 +70,10 @@ class ScanHistory:
     def _database(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.path, timeout=5)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys = ON")
             connection.execute(_CREATE_SCANS)
             connection.execute(_CREATE_IMPORTS)
+            connection.execute(_CREATE_FEEDBACK)
             connection.execute("CREATE INDEX IF NOT EXISTS scans_by_time ON scans (timestamp)")
             yield connection
 
@@ -66,7 +81,7 @@ class ScanHistory:
         self, input_type, scan_status, *, risk_level=None, latency_ms=None,
         feed_freshness=None, timestamp=None,
     ):
-        """Add one scan using an explicit set of metadata fields."""
+        """Add one scan and return its ID and UTC timestamp."""
         if input_type not in INPUT_TYPES or scan_status not in SCAN_STATUSES:
             raise ValueError("Invalid scan input type or status.")
         if risk_level is not None and risk_level not in RISK_LEVELS:
@@ -78,9 +93,21 @@ class ScanHistory:
 
         recorded_at = _utc_timestamp(timestamp or datetime.now(timezone.utc))
         with self._database() as connection:
-            connection.execute(_INSERT_SCAN, (
+            inserted = connection.execute(_INSERT_SCAN, (
                 recorded_at, input_type, scan_status, risk_level, latency_ms, feed_freshness,
             ))
+            return inserted.lastrowid, recorded_at
+
+    def record_feedback(self, scan_id, scan_timestamp, response, *, timestamp=None):
+        """Save the latest response for a completed scan if it still exists."""
+        if response not in ("yes", "no"):
+            raise ValueError("Invalid scan feedback response.")
+
+        recorded_at = _utc_timestamp(timestamp or datetime.now(timezone.utc))
+        with self._database() as connection:
+            # A cleared scan's ID can be reused. Match its timestamp to identify the original scan.
+            updated = connection.execute(_UPSERT_FEEDBACK, (response, recorded_at, scan_id, scan_timestamp))
+            return updated.rowcount == 1
 
     def read(self, *, start_date=None, end_date=None, input_type=None):
         """Return newest-first metadata, optionally filtered by inclusive UTC dates and type."""
@@ -150,6 +177,6 @@ class ScanHistory:
         return inserted
 
     def clear(self):
-        """Remove saved scans and retain migration markers for the preserved legacy CSV."""
+        """Remove saved scans and their feedback while retaining legacy migration markers."""
         with self._database() as connection:
             connection.execute("DELETE FROM scans")

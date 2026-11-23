@@ -1,6 +1,7 @@
 import csv
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 
 from scan_history import HISTORY_COLUMNS, ScanHistory
@@ -79,3 +80,19 @@ def test_parallel_writers_keep_every_scan(tmp_path):
         list(pool.map(record, range(30)))
 
     assert sorted(row["latency_ms"] for row in ScanHistory(path).read()) == list(range(30))
+
+
+def test_clearing_history_removes_feedback_and_rejects_stale_scan(tmp_path):
+    path = tmp_path / "scan_history.sqlite3"
+    history = ScanHistory(path)
+    day = datetime(2026, 11, 23, tzinfo=timezone.utc)
+    original = history.record("URL", "completed", risk_level="LOW", timestamp=day)
+    assert history.record_feedback(*original, "yes", timestamp=day)
+
+    history.clear()
+    replacement = history.record("SMS", "completed", risk_level="HIGH", timestamp=day + timedelta(days=1))
+    assert replacement[0] == original[0]
+    assert not history.record_feedback(*original, "no")
+
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT * FROM scan_feedback").fetchall() == []

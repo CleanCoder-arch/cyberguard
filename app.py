@@ -115,7 +115,7 @@ def save_scan(source_type, result, latency_ms):
         status = "completed" if verdict is not None else "incomplete"
         risk_level = verdict["risk_level"] if verdict is not None else None
         feed_freshness = result.get("phishing_feed", {}).get("status")
-    get_history_store().record(
+    return get_history_store().record(
         source_type, status, risk_level=risk_level,
         latency_ms=latency_ms, feed_freshness=feed_freshness,
     )
@@ -398,6 +398,33 @@ def render_scan_result(result, source_type, is_sample):
         help="Includes the scan type, verdict, available score, and general recommended action.",
         on_click="ignore",
     )
+    if verdict is not None:
+        render_scan_feedback(st.session_state.get("last_scan_reference"))
+
+
+def render_scan_feedback(scan_reference):
+    st.markdown("**Was this result helpful?**")
+    scan_id = scan_reference[0] if scan_reference is not None else None
+    response = None
+    buttons = st.container(horizontal=True)
+    for label in ("Yes", "No"):
+        if buttons.button(label, key=f"scan_feedback_{scan_id}_{label}", disabled=scan_id is None):
+            response = label.lower()
+
+    if response is not None and scan_reference is not None:
+        try:
+            saved = ScanHistory(HISTORY_DATABASE).record_feedback(*scan_reference, response)
+        except (OSError, sqlite3.Error):
+            st.warning("Feedback could not be saved. Please try again.")
+        else:
+            if saved:
+                st.session_state.last_scan_feedback = response
+            else:
+                st.session_state.pop("last_scan_feedback", None)
+                st.warning("This scan is no longer available for feedback.")
+
+    if saved_response := st.session_state.get("last_scan_feedback"):
+        st.caption(f"Saved your {saved_response.capitalize()} response.")
 
 
 def render_scan_evidence(result, input_type, verdict, detector_result):
@@ -474,6 +501,8 @@ def render_scan_evidence(result, input_type, verdict, detector_result):
 def clear_scan_report():
     st.session_state.last_result = None
     st.session_state.pop("last_scan_was_sample", None)
+    st.session_state.pop("last_scan_reference", None)
+    st.session_state.pop("last_scan_feedback", None)
 
 
 def reset_scanner():
@@ -534,7 +563,9 @@ def run_scan(source_type, content):
             st.session_state.last_result = result
             st.session_state.last_scan_was_sample = st.session_state.get("scanner_input_is_sample", False)
         try:
-            save_scan(source_type, result, (perf_counter() - started) * 1000)
+            st.session_state.last_scan_reference = save_scan(
+                source_type, result, (perf_counter() - started) * 1000
+            )
         except (OSError, sqlite3.Error):
             st.warning("Scan metadata could not be saved to history.")
 
