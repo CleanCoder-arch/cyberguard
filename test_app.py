@@ -5,11 +5,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from cyberguard import analyze_input as analyze_with_detectors
 from phishing_feed import FEED_URL, REQUEST_TIMEOUT, PhishingFeedCache
 from scan_history import ScanHistory
+from sms_ocr import SMSOCRError
 from url_normalizer import URLValidationError
 
 
@@ -51,6 +53,26 @@ EXPLAINED_URL_RESULT = {
         "final_score": 10,
     },
     "checks": [{"check": "URL analysis", "status": "completed"}],
+}
+SMS_RESULT = {
+    "sms_result": {
+        "risk_score": 10,
+        "risk_level": "LOW",
+        "ml_prediction": "LEGITIMATE",
+        "phishing_probability": 0.1,
+        "reasons": [],
+        "positive_signals": [],
+    },
+    "combined_risk": {
+        "risk_score": 10,
+        "risk_level": "LOW",
+        "recommendation": "Verify unfamiliar requests.",
+        "suspicious_url_count": 0,
+        "base_score": 10,
+        "multi_url_bonus": 0,
+    },
+    "detected_urls": [],
+    "url_results": [],
 }
 FEED_MATCH = {
     "provider": "Phishunt",
@@ -254,26 +276,7 @@ class TestScannerApp(unittest.TestCase):
         self.assertNotIn("Sample report", self.report_html())
 
     def test_sms_sample_waits_for_analysis(self):
-        self.analyze_input.return_value = {
-            "sms_result": {
-                "risk_score": 10,
-                "risk_level": "LOW",
-                "ml_prediction": "LEGITIMATE",
-                "phishing_probability": 0.1,
-                "reasons": [],
-                "positive_signals": [],
-            },
-            "combined_risk": {
-                "risk_score": 10,
-                "risk_level": "LOW",
-                "recommendation": "Verify unfamiliar requests.",
-                "suspicious_url_count": 0,
-                "base_score": 10,
-                "multi_url_bonus": 0,
-            },
-            "detected_urls": [],
-            "url_results": [],
-        }
+        self.analyze_input.return_value = SMS_RESULT
         self.select_mode("SMS")
         self.click_scanner_button("Load a sample")
 
@@ -284,6 +287,71 @@ class TestScannerApp(unittest.TestCase):
 
         self.click_scanner_button("Analyze Message")
 
+        self.analyze_input.assert_called_once_with("SMS", message)
+        self.assert_report_visible(True)
+
+    def test_sms_screenshot_prefills_editable_text_without_saving_payload(self):
+        self.analyze_input.return_value = SMS_RESULT
+        self.select_mode("SMS")
+        filename = "private-screenshot.png"
+        screenshot = (QR_FIXTURES / "url.png").read_bytes()
+        extracted = "Recognized private code 701293."
+        corrected = "Corrected private code 701294."
+
+        with patch("sms_ocr.extract_sms_text", return_value=extracted) as ocr:
+            uploader, = self.app.file_uploader
+            self.assertEqual(uploader.label, "Upload screenshot")
+            uploader.set_value((filename, screenshot, "image/png")).run()
+            self.assertEqual(self.app.text_area[0].value, extracted)
+            self.assert_report_visible(False)
+            self.analyze_input.assert_not_called()
+            self.assertFalse(HISTORY_PATH.exists())
+
+            self.app.text_area[0].set_value(corrected).run()
+            self.app.run()
+            self.assertEqual(self.app.text_area[0].value, corrected)
+            self.analyze_input.assert_not_called()
+
+            with patch("streamlit.download_button", wraps=st.download_button) as download:
+                self.click_scanner_button("Analyze Message")
+
+            ocr.assert_called_once_with(screenshot)
+
+        self.analyze_input.assert_called_once_with("SMS", corrected)
+        self.assert_report_visible(True)
+        record, = ScanHistory(HISTORY_PATH).read()
+        self.assertEqual((record["input_type"], record["scan_status"]), ("SMS", "completed"))
+        database = HISTORY_PATH.read_bytes()
+        download.assert_called_once()
+        summary = download.call_args.kwargs["data"].encode()
+        for payload in (filename.encode(), screenshot, extracted.encode(), corrected.encode()):
+            self.assertNotIn(payload, database)
+            self.assertNotIn(payload, summary)
+
+    def test_sms_screenshot_ocr_errors_preserve_manual_entry(self):
+        self.analyze_input.return_value = SMS_RESULT
+        self.select_mode("SMS")
+        message = "Text entered manually."
+        self.app.text_area[0].set_value(message).run()
+        screenshot = (QR_FIXTURES / "text.jpg").read_bytes()
+
+        for filename, notice in (
+            ("unavailable.jpg", "Local OCR is unavailable."),
+            ("blank.jpg", "No text was found in the screenshot."),
+        ):
+            with self.subTest(notice=notice), patch(
+                "sms_ocr.extract_sms_text", side_effect=SMSOCRError(notice),
+            ) as ocr:
+                self.app.file_uploader[0].set_value((filename, screenshot, "image/jpeg")).run()
+                self.assertEqual(self.app.text_area[0].value, message)
+                self.assertIn(
+                    f"{notice} You can still type or paste the SMS.", [item.value for item in self.app.warning]
+                )
+                self.assert_report_visible(False)
+                self.analyze_input.assert_not_called()
+                ocr.assert_called_once_with(screenshot)
+
+        self.click_scanner_button("Analyze Message")
         self.analyze_input.assert_called_once_with("SMS", message)
         self.assert_report_visible(True)
 

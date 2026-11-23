@@ -21,6 +21,7 @@ from scan_history import FEED_STATES, HISTORY_COLUMNS, INPUT_TYPES, RISK_LEVELS,
 from scan_summary import build_scan_summary
 from scanner_report import render_report_heading, render_result_overview
 from scanner_style import SCANNER_CSS
+from sms_ocr import MAX_SCREENSHOT_BYTES, SMSOCRError, extract_sms_text
 from url_normalizer import URLValidationError
 
 
@@ -499,6 +500,10 @@ def load_text_sample(widget_key, text):
     clear_scan_report()
 
 
+def mark_sms_screenshot_changed():
+    st.session_state.scanner_sms_screenshot_changed = True
+
+
 def load_qr_sample():
     barcode = zxingcpp.create_barcode(SAMPLE_URL, zxingcpp.BarcodeFormat.QRCode)
     rendered = zxingcpp.write_barcode_to_image(barcode, scale=5)
@@ -633,6 +638,27 @@ elif page == "Scanner":
                 sample_callback = load_text_sample
                 sample_args = ("scanner_url", SAMPLE_URL)
             elif source_type == "SMS":
+                screenshot = st.file_uploader(
+                    "Upload screenshot",
+                    type=["png", "jpg", "jpeg"],
+                    max_upload_size=MAX_SCREENSHOT_BYTES // (1024 * 1024),
+                    key="scanner_sms_screenshot",
+                    help="Optional. Read a PNG or JPEG locally, then review and edit the SMS message below.",
+                    on_change=mark_sms_screenshot_changed,
+                )
+                if st.session_state.pop("scanner_sms_screenshot_changed", False):
+                    st.session_state.pop("scanner_sms_ocr_warning", None)
+                    if screenshot is not None:
+                        with st.spinner("Reading screenshot..."):
+                            try:
+                                text = extract_sms_text(screenshot.getvalue())
+                            except SMSOCRError as exc:
+                                st.session_state.scanner_sms_ocr_warning = str(exc)
+                            else:
+                                st.session_state.scanner_sms = text
+                                reset_scanner()
+                if screenshot is not None and (warning := st.session_state.get("scanner_sms_ocr_warning")):
+                    st.warning(f"{warning} You can still type or paste the SMS.")
                 content = st.text_area(
                     "SMS message",
                     placeholder="Paste the SMS you want to check.",

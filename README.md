@@ -15,6 +15,12 @@ py -3.10 -m venv .venv
 
 The bundled models, benchmark summary, and test fixtures are sufficient for setup. The tests use offline feed fixtures.
 
+## SMS screenshots
+
+In the **SMS** tab, use **Upload screenshot** to read one PNG or JPEG (up to 5 MiB, 4096 pixels per side, and 12 megapixels). Review and edit the extracted text in **SMS message**, then click **Analyze Message**. History and downloadable summaries contain scan metadata only.
+
+Screenshot OCR runs locally on the machine running Streamlit. Install Tesseract with English language data and make `tesseract` available on `PATH` before starting the app. You can type or paste messages with or without Tesseract. [Tesseract installation guide](https://tesseract-ocr.github.io/tessdoc/Installation)
+
 ## Phishing feed
 
 No API key is required. On demand, CyberGuard fetches the [Phishunt text feed](https://phishunt.io/feed.txt) at most once an hour with a five-second timeout. It stores the last successful snapshot in `data/phishing_feed.sqlite3`. Submitted content is matched locally, and the report shows stale or unavailable status when applicable. The feed leaves risk scores unchanged.
