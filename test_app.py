@@ -72,15 +72,24 @@ class TestScannerApp(unittest.TestCase):
         self.addCleanup(analysis.stop)
 
         self.app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
-        self.select_page("🔍 Scanner")
+        self.assertFalse(self.app.exception)
+        self.assertEqual(self.app.session_state["active_page"], "Scanner")
 
     def select_page(self, page):
-        self.app.sidebar.radio[0].set_value(page).run()
+        key = "cyberguard_brand" if page == "Dashboard" else f"nav_{page.lower()}"
+        self.app.button(key=key).click().run()
+        self.assertFalse(self.app.exception)
+
+    def select_mode(self, mode):
+        self.app.radio(key="scanner_mode").set_value(mode).run()
         self.assertFalse(self.app.exception)
 
     def scan_url(self, url):
         self.app.text_input[0].set_value(url)
-        self.app.button[0].click().run()
+        self.click_scanner_button("Analyze URL")
+
+    def click_scanner_button(self, label):
+        next(button for button in self.app.main.button if button.label == label).click().run()
 
     def upload_qr(self, filename):
         mime_type = "image/jpeg" if filename.endswith(".jpg") else "image/png"
@@ -101,15 +110,16 @@ class TestScannerApp(unittest.TestCase):
         cache_patch = patch("cyberguard.get_feed_cache", return_value=feed)
         cache_patch.start()
         self.addCleanup(cache_patch.stop)
-        self.app.main.radio[0].set_value("QR Image").run()
+        self.select_mode("QR Image")
         return fetch
 
     def assert_report_visible(self, visible):
         self.assertFalse(self.app.exception)
-        self.assertEqual(
-            "📋 Analysis Result" in [item.value for item in self.app.subheader],
-            visible,
-        )
+        labels = [button.label for button in self.app.download_button]
+        self.assertEqual(labels, ["Download summary"] if visible else [])
+
+    def report_html(self):
+        return "\n".join(item.proto.body for item in self.app.get("html"))
 
     def seed_history(self):
         history = ScanHistory(HISTORY_PATH)
@@ -127,7 +137,11 @@ class TestScannerApp(unittest.TestCase):
 
     def test_dashboard_counts_and_filters_match_saved_metadata(self):
         self.seed_history()
-        self.select_page("🏠 Dashboard")
+        self.select_page("History")
+        self.assertEqual(self.app.session_state["active_page"], "History")
+        self.assertEqual(len(self.app.dataframe[0].value), 5)
+
+        self.select_page("Dashboard")
         metrics = {item.label: item.value for item in self.app.metric}
         self.assertEqual(metrics, {
             "Total scans": "5", "Completed": "3", "Incomplete": "1", "Failed": "1",
@@ -151,19 +165,19 @@ class TestScannerApp(unittest.TestCase):
 
     def test_dashboard_shortcuts_open_each_scanner(self):
         for label, mode in (
-            ("Scan a URL", "URL"), ("Scan an SMS", "SMS / Message"), ("Scan a QR image", "QR Image"),
+            ("Scan a URL", "URL"), ("Scan an SMS", "SMS"), ("Scan a QR image", "QR Image"),
         ):
             with self.subTest(mode=mode):
-                self.select_page("🏠 Dashboard")
+                self.select_page("Dashboard")
                 next(button for button in self.app.button if button.label == label).click().run()
                 self.assertFalse(self.app.exception)
-                self.assertEqual(self.app.sidebar.radio[0].value, "🔍 Scanner")
-                self.assertEqual(self.app.main.radio[0].value, mode)
+                self.assertEqual(self.app.session_state["active_page"], "Scanner")
+                self.assertEqual(self.app.radio(key="scanner_mode").value, mode)
 
     def test_analytics_shows_verdict_latency_and_feed_counts_when_benchmark_missing(self):
         self.seed_history()
         with patch("benchmark_results.load_stage3b_benchmark", return_value=None):
-            self.select_page("📊 Analytics")
+            self.select_page("Analytics")
 
         metrics = {item.label: item.value for item in self.app.metric}
         self.assertEqual(metrics["Incomplete"], "1")
@@ -191,17 +205,113 @@ class TestScannerApp(unittest.TestCase):
 
         self.scan_url("https://example.org")
         self.assert_report_visible(True)
-        self.app.main.radio[0].set_value("SMS / Message").run()
+        self.select_mode("SMS")
         self.assert_report_visible(False)
-        self.app.main.radio[0].set_value("URL").run()
+        self.select_mode("URL")
         self.assert_report_visible(False)
 
         self.scan_url("https://example.com")
         self.assert_report_visible(True)
-        self.select_page("📊 Analytics")
+        self.select_page("Analytics")
         self.assert_report_visible(False)
-        self.select_page("🔍 Scanner")
+        self.select_page("Scanner")
         self.assert_report_visible(False)
+
+    def test_url_sample_loads_input_and_report_controls_follow_analysis(self):
+        self.analyze_input.return_value = EXPLAINED_URL_RESULT
+        self.scan_url("https://example.com")
+        self.assert_report_visible(True)
+        self.assertNotIn("Sample report", self.report_html())
+        self.analyze_input.reset_mock()
+
+        self.click_scanner_button("Load a sample")
+
+        self.assertEqual(self.app.text_input[0].value, "https://example.com")
+        self.assert_report_visible(False)
+        self.assertNotIn("Sample report", self.report_html())
+        self.analyze_input.assert_not_called()
+
+        self.click_scanner_button("Analyze URL")
+
+        self.analyze_input.assert_called_once_with("URL", "https://example.com")
+        self.assert_report_visible(True)
+        report = self.report_html()
+        self.assertIn("Low overall risk", report)
+        self.assertIn("Sample report", report)
+        self.assertIn("Recommended action", report)
+        self.assertIn(EXPLAINED_URL_RESULT["recommendation"], report)
+        evidence, = [section for section in self.app.expander if section.label == "Why this result?"]
+        self.assertFalse(evidence.proto.expanded)
+        self.assertTrue(evidence.get("dataframe"))
+        self.assertFalse(evidence.get("download_button"))
+
+        self.click_scanner_button("Load a sample")
+        self.assert_report_visible(False)
+        self.analyze_input.assert_called_once()
+
+        self.scan_url("https://example.org")
+        self.assert_report_visible(True)
+        self.assertNotIn("Sample report", self.report_html())
+
+    def test_sms_sample_waits_for_analysis(self):
+        self.analyze_input.return_value = {
+            "sms_result": {
+                "risk_score": 10,
+                "risk_level": "LOW",
+                "ml_prediction": "LEGITIMATE",
+                "phishing_probability": 0.1,
+                "reasons": [],
+                "positive_signals": [],
+            },
+            "combined_risk": {
+                "risk_score": 10,
+                "risk_level": "LOW",
+                "recommendation": "Verify unfamiliar requests.",
+                "suspicious_url_count": 0,
+                "base_score": 10,
+                "multi_url_bonus": 0,
+            },
+            "detected_urls": [],
+            "url_results": [],
+        }
+        self.select_mode("SMS")
+        self.click_scanner_button("Load a sample")
+
+        message = "Reminder: our meeting starts at 10 tomorrow."
+        self.assertEqual(self.app.text_area[0].value, message)
+        self.assert_report_visible(False)
+        self.analyze_input.assert_not_called()
+
+        self.click_scanner_button("Analyze Message")
+
+        self.analyze_input.assert_called_once_with("SMS", message)
+        self.assert_report_visible(True)
+
+    def test_qr_sample_is_decoded_and_upload_replaces_sample(self):
+        self.select_mode("QR Image")
+        self.click_scanner_button("Load a sample")
+
+        self.assert_report_visible(False)
+        self.analyze_input.assert_not_called()
+
+        self.click_scanner_button("Analyze QR Image")
+
+        self.analyze_input.assert_called_once_with("URL", "https://example.com")
+        self.assert_report_visible(True)
+        self.assertIn("Decoded URL: https://example.com", [item.value for item in self.app.text])
+        record, = ScanHistory(HISTORY_PATH).read()
+        self.assertEqual((record["input_type"], record["scan_status"]), ("QR", "completed"))
+
+        self.click_scanner_button("Load a sample")
+        self.assert_report_visible(False)
+        self.analyze_input.assert_called_once()
+
+        self.upload_qr("unreadable.png")
+        self.click_scanner_button("Analyze QR Image")
+
+        self.assert_report_visible(False)
+        self.assertIn("could not be read", self.app.error[0].value)
+        self.analyze_input.assert_called_once()
 
     def test_partial_sms_shows_completed_checks_without_overall_verdict(self):
         failed_url = "https://example.org"
@@ -235,11 +345,11 @@ class TestScannerApp(unittest.TestCase):
                 {"check": "Overall risk", "status": "skipped"},
             ],
         }
-        self.app.main.radio[0].set_value("SMS / Message").run()
+        self.select_mode("SMS")
         self.app.text_area[0].set_value(
             "Meeting at https://example.com or https://example.org"
         )
-        self.app.button[0].click().run()
+        self.click_scanner_button("Analyze Message")
 
         self.assert_report_visible(True)
         metrics = {metric.label: metric.value for metric in self.app.metric}
@@ -279,6 +389,8 @@ class TestScannerApp(unittest.TestCase):
         self.scan_url("https://example.com")
 
         self.assert_report_visible(True)
+        self.assertIn("Model signal", self.report_html())
+        self.assertIn("Flagged · 52.50%", self.report_html())
         metrics = {metric.label: metric.value for metric in self.app.metric}
         self.assertEqual(metrics["Overall Risk"], "LOW")
         self.assertEqual(metrics["ML Malicious Probability"], "52.50%")
@@ -301,6 +413,8 @@ class TestScannerApp(unittest.TestCase):
         self.scan_url("https://example.com")
 
         self.assert_report_visible(True)
+        self.assertIn("Threat feed", self.report_html())
+        self.assertIn("Exact match found · Fresh cache", self.report_html())
         self.assertIn(
             "Phishunt phishing feed · Exact match found",
             [item.value for item in self.app.warning],
@@ -325,6 +439,7 @@ class TestScannerApp(unittest.TestCase):
         self.scan_url("https://example.com")
 
         self.assert_report_visible(True)
+        self.assertIn("Cache unavailable", self.report_html())
         self.assertIn(
             "Phishunt phishing feed · Cache unavailable",
             [item.value for item in self.app.info],
@@ -352,7 +467,7 @@ class TestScannerApp(unittest.TestCase):
         self.assert_report_visible(True)
 
         self.analyze_input.side_effect = RuntimeError("URL check failed.")
-        self.app.button[0].click().run()
+        self.click_scanner_button("Analyze URL")
 
         self.assert_report_visible(False)
         self.assertTrue(self.app.error)
@@ -375,7 +490,7 @@ class TestScannerApp(unittest.TestCase):
     def test_qr_url_reuses_report_and_records_metadata_only(self):
         fetch = self.select_qr_with_offline_feed()
         self.upload_qr("url.png")
-        self.app.button[0].click().run()
+        self.click_scanner_button("Analyze QR Image")
 
         self.assert_report_visible(True)
         self.analyze_input.assert_called_once_with("URL", "https://example.com")
@@ -406,7 +521,7 @@ class TestScannerApp(unittest.TestCase):
         self.analyze_input.reset_mock()
         fetch = self.select_qr_with_offline_feed()
         self.upload_qr("text.jpg")
-        self.app.button[0].click().run()
+        self.click_scanner_button("Analyze QR Image")
 
         self.assert_report_visible(True)
         self.analyze_input.assert_called_once_with("SMS", "Meeting details: https://example.com/Agenda")
@@ -423,9 +538,9 @@ class TestScannerApp(unittest.TestCase):
         fetch.assert_not_called()
 
     def test_invalid_qr_uploads_clear_previous_report_and_do_not_start_scan(self):
-        self.app.main.radio[0].set_value("QR Image").run()
+        self.select_mode("QR Image")
         self.upload_qr("url.png")
-        self.app.button[0].click().run()
+        self.click_scanner_button("Analyze QR Image")
         self.assert_report_visible(True)
         self.analyze_input.reset_mock()
 
@@ -438,7 +553,7 @@ class TestScannerApp(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.upload_qr(filename)
                 self.assert_report_visible(False)
-                self.app.button[0].click().run()
+                self.click_scanner_button("Analyze QR Image")
                 self.assert_report_visible(False)
                 self.assertIn(description, self.app.error[0].value)
                 self.assertNotIn("fixture-only", self.app.error[0].value)

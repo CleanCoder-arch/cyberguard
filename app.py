@@ -1,12 +1,15 @@
 import sqlite3
+from io import BytesIO
 from pathlib import Path
 from time import perf_counter
 
 
 
+import numpy as np
 import pandas as pd
-
 import streamlit as st
+import zxingcpp
+from PIL import Image
 
 
 
@@ -15,6 +18,9 @@ from cyberguard import analyze_input
 from detector_models import DetectorUnavailableError
 from qr_scanner import MAX_IMAGE_BYTES, QRScanError, decode_qr_image
 from scan_history import FEED_STATES, HISTORY_COLUMNS, INPUT_TYPES, RISK_LEVELS, ScanHistory
+from scan_summary import build_scan_summary
+from scanner_report import render_report_heading, render_result_overview
+from scanner_style import SCANNER_CSS
 from url_normalizer import URLValidationError
 
 
@@ -31,13 +37,13 @@ from url_normalizer import URLValidationError
 
 st.set_page_config(
 
-    page_title="CyberGuard",
+    page_title="CyberGuard 2.0",
 
     page_icon="🛡️",
 
     layout="wide",
 
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 
 )
 
@@ -47,6 +53,15 @@ st.set_page_config(
 
 HISTORY_DATABASE = Path("data/scan_history.sqlite3")
 LEGACY_HISTORY_FILE = Path("data/scan_history.csv")
+
+SCANNER_MODES = {"URL": "URL", "SMS": "SMS", "QR Image": "QR"}
+SCANNER_MODE_LABELS = {
+    "URL": ":material/link: URL",
+    "SMS": ":material/chat_bubble_outline: SMS",
+    "QR Image": ":material/qr_code: QR Image",
+}
+SAMPLE_URL = "https://example.com"
+SAMPLE_MESSAGE = "Reminder: our meeting starts at 10 tomorrow."
 
 
 
@@ -60,124 +75,7 @@ LEGACY_HISTORY_FILE = Path("data/scan_history.csv")
 
 
 
-st.markdown(
-
-    """
-
-    <style>
-
-
-
-    .main-title {
-
-        font-size: 42px;
-
-        font-weight: 800;
-
-        margin-bottom: 0;
-
-    }
-
-
-
-    .subtitle {
-
-        font-size: 18px;
-
-        margin-bottom: 25px;
-
-        opacity: 0.75;
-
-    }
-
-
-
-    .dashboard-card {
-
-        padding: 22px;
-
-        border-radius: 14px;
-
-        border: 1px solid rgba(128,128,128,0.25);
-
-        margin-bottom: 15px;
-
-    }
-
-
-
-    .big-number {
-
-        font-size: 34px;
-
-        font-weight: 700;
-
-    }
-
-
-
-    .small-label {
-
-        font-size: 14px;
-
-        opacity: 0.7;
-
-    }
-
-
-
-    .risk-high {
-
-        padding: 18px;
-
-        border-radius: 12px;
-
-        background: rgba(255, 75, 75, 0.15);
-
-        border: 1px solid rgba(255, 75, 75, 0.35);
-
-    }
-
-
-
-    .risk-medium {
-
-        padding: 18px;
-
-        border-radius: 12px;
-
-        background: rgba(255, 180, 0, 0.15);
-
-        border: 1px solid rgba(255, 180, 0, 0.35);
-
-    }
-
-
-
-    .risk-low {
-
-        padding: 18px;
-
-        border-radius: 12px;
-
-        background: rgba(50, 200, 100, 0.15);
-
-        border: 1px solid rgba(50, 200, 100, 0.35);
-
-    }
-
-
-
-    </style>
-
-    """,
-
-    unsafe_allow_html=True
-
-)
-
-
-
+st.html(SCANNER_CSS)
 
 
 # ============================================================
@@ -475,26 +373,36 @@ def render_link_analysis(result):
             render_score_breakdown(link.get("score_breakdown"), "URL risk score changes")
 
 
-def render_scan_result(result, input_type):
+def render_scan_result(result, source_type, is_sample):
+    input_type = "SMS" if "sms_result" in result else "URL"
     verdict, detector_result = get_scan_results(result, input_type)
-    st.divider()
-    st.subheader("📋 Analysis Result")
+    st.html(render_report_heading(is_sample))
+    st.html(render_result_overview(result, input_type, verdict, detector_result))
 
-    if verdict is None:
-        st.warning("Analysis incomplete. An overall verdict is unavailable.")
-    else:
+    with st.expander("Why this result?"):
+        if verdict is None:
+            st.warning("Analysis incomplete. An overall verdict is unavailable.")
+        if source_type == "QR":
+            payload_type = "a web URL" if input_type == "URL" else "a text message"
+            st.caption(f"QR image decoded locally as {payload_type}.")
+            if input_type == "URL":
+                st.text(f"Decoded URL: {result['url']}")
+        render_scan_evidence(result, input_type, verdict, detector_result)
+    st.download_button(
+        "Download summary",
+        data=build_scan_summary(source_type, verdict),
+        file_name="cyberguard-summary.txt",
+        mime="text/plain",
+        icon=":material/download:",
+        help="Includes the scan type, verdict, available score, and general recommended action.",
+        on_click="ignore",
+    )
+
+
+def render_scan_evidence(result, input_type, verdict, detector_result):
+    if verdict is not None:
         risk_level = verdict["risk_level"]
         risk_score = verdict["risk_score"]
-        icon = {"HIGH": "🚨", "MEDIUM": "⚠️", "LOW": "✅"}[risk_level]
-        st.markdown(
-            f"""
-            <div class="risk-{risk_level.lower()}">
-                <h2>{icon} {risk_level} RISK</h2>
-                <p>Risk Score: <strong>{risk_score}/100</strong></p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
     if input_type != "SMS" or not result["url_results"]:
         render_phishing_feed(result.get("phishing_feed"))
@@ -561,122 +469,94 @@ def render_scan_result(result, input_type):
         if scheme := result.get("scheme"):
             st.write("**Scheme:**", scheme)
 
-    if verdict is not None:
-        st.subheader("🛡️ Recommendation")
-        show_recommendation = {"HIGH": st.error, "MEDIUM": st.warning, "LOW": st.info}
-        show_recommendation[risk_level](verdict["recommendation"])
-
 
 def clear_scan_report():
     st.session_state.last_result = None
+    st.session_state.pop("last_scan_was_sample", None)
+
+
+def reset_scanner():
+    clear_scan_report()
+    st.session_state.pop("scanner_input_is_sample", None)
+    st.session_state.pop("scanner_qr_sample", None)
+
+
+def navigate(page):
+    if st.session_state.active_page != page:
+        reset_scanner()
+        st.session_state.active_page = page
 
 
 def open_scanner(mode):
-    st.session_state.active_page = "🔍 Scanner"
+    st.session_state.active_page = "Scanner"
     st.session_state.scanner_mode = mode
+    reset_scanner()
+
+
+def load_text_sample(widget_key, text):
+    st.session_state[widget_key] = text
+    st.session_state.scanner_input_is_sample = True
     clear_scan_report()
 
 
+def load_qr_sample():
+    barcode = zxingcpp.create_barcode(SAMPLE_URL, zxingcpp.BarcodeFormat.QRCode)
+    rendered = zxingcpp.write_barcode_to_image(barcode, scale=5)
+    with BytesIO() as png:
+        Image.fromarray(np.asarray(rendered)).save(png, format="PNG")
+        st.session_state.scanner_qr_sample = png.getvalue()
+    st.session_state.scanner_input_is_sample = True
+    # A new uploader clears the previous file selection in the browser.
+    st.session_state.scanner_qr_upload_version = st.session_state.get("scanner_qr_upload_version", 0) + 1
+    clear_scan_report()
+
+
+def run_scan(source_type, content):
+    clear_scan_report()
+    with st.spinner("Analyzing..."):
+        started = perf_counter()
+        result = None
+        try:
+            input_type = source_type
+            if source_type == "QR":
+                input_type, content = decode_qr_image(content)
+            result = analyze_input(input_type, content)
+        except (DetectorUnavailableError, URLValidationError, QRScanError) as exc:
+            st.error(str(exc))
+        except Exception:
+            st.error("Analysis failed. Please try again.")
+        else:
+            st.session_state.last_result = result
+            st.session_state.last_scan_was_sample = st.session_state.get("scanner_input_is_sample", False)
+        try:
+            save_scan(source_type, result, (perf_counter() - started) * 1000)
+        except (OSError, sqlite3.Error):
+            st.warning("Scan metadata could not be saved to history.")
+
+
 st.session_state.setdefault("last_result", None)
+page = st.session_state.setdefault("active_page", "Scanner")
 
-
-# ============================================================
-
-# SIDEBAR
-
-# ============================================================
-
-
-
-with st.sidebar:
-
-
-
-    st.markdown(
-
-        "# 🛡️ CyberGuard"
-
+with st.container(key="cyberguard-header"):
+    brand, navigation = st.columns([1.7, 1], vertical_alignment="center")
+    brand.button(
+        "CyberGuard 2.0",
+        type="tertiary",
+        key="cyberguard_brand",
+        on_click=navigate,
+        args=("Dashboard",),
+        help="Open the CyberGuard dashboard",
     )
-
-
-
-    st.caption(
-
-        "AI-Powered Cyber Threat Detection"
-
-    )
-
-
-
-    st.divider()
-
-
-
-
-
-    page = st.radio(
-
-        "Navigation",
-
-        [
-
-            "🏠 Dashboard",
-
-            "🔍 Scanner",
-
-            "📊 Analytics",
-
-            "📜 Scan History",
-
-            "ℹ️ About"
-
-        ],
-        key="active_page",
-        on_change=clear_scan_report,
-    )
-
-
-
-
-
-    st.divider()
-
-
-
-
-
-    st.markdown(
-
-        "### Detection Modules"
-
-    )
-
-
-
-    st.markdown(
-
-        """
-
-        🔗 URL Detection
-
-
-
-        📱 SMS Detection
-
-
-
-        🧠 Machine Learning
-
-
-
-        🛡️ Risk Analysis
-
-        """
-
-    )
-
-
-
+    with navigation:
+        for column, destination in zip(st.columns(3, gap="small"), ("Scanner", "History", "Analytics")):
+            column.button(
+                destination,
+                key=f"nav_{destination.lower()}",
+                type="primary" if page == destination else "tertiary",
+                width="stretch",
+                on_click=navigate,
+                args=(destination,),
+            )
 
 
 # ============================================================
@@ -687,7 +567,7 @@ with st.sidebar:
 
 
 
-if page == "🏠 Dashboard":
+if page == "Dashboard":
     st.title("CyberGuard Dashboard")
     st.caption("Scan a URL, SMS message, or QR image and review local scan activity.")
 
@@ -695,7 +575,7 @@ if page == "🏠 Dashboard":
         st.subheader("Start a scan")
         for column, (label, mode) in zip(st.columns(3), (
             ("Scan a URL", "URL"),
-            ("Scan an SMS", "SMS / Message"),
+            ("Scan an SMS", "SMS"),
             ("Scan a QR image", "QR Image"),
         )):
             column.button(label, width="stretch", on_click=open_scanner, args=(mode,))
@@ -720,204 +600,91 @@ if page == "🏠 Dashboard":
 
 
 
-elif page == "🔍 Scanner":
-
-
-
-    st.markdown(
-
-        '<div class="main-title">🔍 Security Scanner</div>',
-
-        unsafe_allow_html=True
-
-    )
-
-
-
-    st.markdown(
-
-        '<div class="subtitle">'
-
-        'Analyze a URL, message, or QR image'
-
-        '</div>',
-
-        unsafe_allow_html=True
-
-    )
-
-
-
-
-
-    scan_type = st.radio(
-
-        "Select scanner",
-
-        [
-
-            "URL",
-
-            "SMS / Message",
-
-            "QR Image"
-
-        ],
-
-        horizontal=True,
-        key="scanner_mode",
-        on_change=clear_scan_report,
-    )
-
-    qr_scan = scan_type == "QR Image"
-
-
-
-
-
-    # --------------------------------------------------------
-
-    # URL
-
-    # --------------------------------------------------------
-
-
-
-    if scan_type == "URL":
-
-
-
-        user_input = st.text_input(
-
-            "Enter URL",
-
-            placeholder="https://example.com",
-            on_change=clear_scan_report,
-        )
-
-
-
-
-
-        scan_button = st.button(
-
-            "🔍 Analyze URL",
-
-            type="primary"
-
-        )
-
-
-
-
-
-        input_type = "URL"
-
-
-
-
-
-    # --------------------------------------------------------
-
-    # SMS
-
-    # --------------------------------------------------------
-
-
-
-    elif scan_type == "SMS / Message":
-
-
-
-        user_input = st.text_area(
-
-            "Enter message",
-
-            placeholder=(
-
-                "Paste the suspicious SMS or "
-
-                "message here..."
-
-            ),
-
-            height=180,
-            on_change=clear_scan_report,
-        )
-
-
-
-
-
-        scan_button = st.button(
-
-            "🔍 Analyze Message",
-
-            type="primary"
-
-        )
-
-
-
-
-
-        input_type = "SMS"
-
-
-    else:
-        uploaded_image = st.file_uploader(
-            "Upload a QR image",
-            type=["png", "jpg", "jpeg"],
-            max_upload_size=MAX_IMAGE_BYTES // (1024 * 1024),
-            on_change=clear_scan_report,
-        )
-        scan_button = st.button("🔍 Analyze QR Image", type="primary")
-
-
-
-
-    # --------------------------------------------------------
-
-    # ANALYZE
-
-    # --------------------------------------------------------
-
-
-
-    if scan_button:
-        clear_scan_report()
-        if qr_scan and uploaded_image is None:
-            st.warning("Upload a PNG or JPEG image to analyze.")
-        elif not qr_scan and not user_input.strip():
-            st.warning("Please enter something to analyze.")
-        else:
-            with st.spinner("Analyzing..."):
-                started = perf_counter()
-                source_type = "QR" if qr_scan else input_type
-                result = None
-                try:
-                    if qr_scan:
-                        input_type, user_input = decode_qr_image(uploaded_image.getvalue())
-                    result = analyze_input(input_type, user_input)
-                except (DetectorUnavailableError, URLValidationError, QRScanError) as exc:
-                    st.error(str(exc))
-                except Exception:
-                    st.error("Analysis failed. Please try again.")
+elif page == "Scanner":
+    with st.container(key="scanner"):
+        st.html("""
+            <div class="cg-scanner-heading">
+                <h1>Check a suspicious message or link</h1>
+                <p>Scan a URL, paste an SMS, or upload a QR image.</p>
+            </div>
+        """)
+        input_column, result_column = st.columns([0.43, 0.57], gap="small")
+        with input_column, st.container(key="scanner-input", border=True):
+            st.subheader("Start a scan")
+            scan_mode = st.radio(
+                "Select scanner",
+                SCANNER_MODES,
+                format_func=SCANNER_MODE_LABELS.__getitem__,
+                horizontal=True,
+                label_visibility="collapsed",
+                width="stretch",
+                key="scanner_mode",
+                on_change=reset_scanner,
+            )
+            source_type = SCANNER_MODES[scan_mode]
+            if source_type == "URL":
+                content = st.text_input(
+                    "Website URL",
+                    placeholder=SAMPLE_URL,
+                    key="scanner_url",
+                    on_change=reset_scanner,
+                )
+                scan_label = "Analyze URL"
+                sample_callback = load_text_sample
+                sample_args = ("scanner_url", SAMPLE_URL)
+            elif source_type == "SMS":
+                content = st.text_area(
+                    "SMS message",
+                    placeholder="Paste the SMS you want to check.",
+                    height=150,
+                    key="scanner_sms",
+                    on_change=reset_scanner,
+                )
+                scan_label = "Analyze Message"
+                sample_callback = load_text_sample
+                sample_args = ("scanner_sms", SAMPLE_MESSAGE)
+            else:
+                upload_version = st.session_state.get("scanner_qr_upload_version", 0)
+                uploaded_image = st.file_uploader(
+                    "Upload a QR image",
+                    type=["png", "jpg", "jpeg"],
+                    max_upload_size=MAX_IMAGE_BYTES // (1024 * 1024),
+                    key=f"scanner_qr_upload_{upload_version}",
+                    on_change=reset_scanner,
+                )
+                content = uploaded_image.getvalue() if uploaded_image is not None else None
+                if sample := st.session_state.get("scanner_qr_sample"):
+                    content = sample
+                    st.image(content, width=112, caption="Sample QR image")
+                scan_label = "Analyze QR Image"
+                sample_callback = load_qr_sample
+                sample_args = ()
+
+            scan_button = st.button(scan_label, type="primary", width="stretch", key="analyze_scan")
+            st.button(
+                "Load a sample",
+                width="stretch",
+                key="load_scan_sample",
+                on_click=sample_callback,
+                args=sample_args,
+            )
+
+            if scan_button:
+                if source_type == "QR" and content is None:
+                    clear_scan_report()
+                    st.warning("Upload a PNG or JPEG image to analyze.")
+                elif source_type != "QR" and not content.strip():
+                    clear_scan_report()
+                    st.warning("Please enter something to analyze.")
                 else:
-                    st.session_state.last_result = result
-                try:
-                    save_scan(source_type, result, (perf_counter() - started) * 1000)
-                except (OSError, sqlite3.Error):
-                    st.warning("Scan metadata could not be saved to history.")
+                    run_scan(source_type, content)
 
-    if (result := st.session_state.last_result) is not None:
-        report_type = "SMS" if "sms_result" in result else "URL"
-        if qr_scan:
-            payload_type = "a web URL" if report_type == "URL" else "a text message"
-            st.caption(f"QR image decoded locally as {payload_type}.")
-            if report_type == "URL":
-                st.text(f"Decoded URL: {result['url']}")
-        render_scan_result(result, report_type)
+        with result_column, st.container(key="scanner-report", border=True):
+            if (result := st.session_state.last_result) is not None:
+                render_scan_result(result, source_type, st.session_state.get("last_scan_was_sample", False))
+            else:
+                st.html(render_report_heading())
+                st.info("Your verdict and recommended action will appear here after a scan.")
 
 
 # ============================================================
@@ -927,7 +694,7 @@ elif page == "🔍 Scanner":
 
 
 
-elif page == "📊 Analytics":
+elif page == "Analytics":
     st.title("Analytics")
     st.caption("Scan activity, detector outcomes, and held-out benchmark results.")
     history = filter_history()
@@ -976,7 +743,7 @@ elif page == "📊 Analytics":
 
 
 
-elif page == "📜 Scan History":
+elif page == "History":
     st.title("Scan History")
     st.caption("Saved scan metadata. Timestamps and date filters use UTC.")
     history = filter_history()
@@ -1002,21 +769,11 @@ elif page == "📜 Scan History":
 
 
 
-elif page == "ℹ️ About":
+elif page == "About":
 
 
 
-    st.markdown(
-
-        '<div class="main-title">ℹ️ About CyberGuard</div>',
-
-        unsafe_allow_html=True
-
-    )
-
-
-
-
+    st.title("About CyberGuard")
 
     st.markdown(
 
@@ -1140,12 +897,11 @@ elif page == "ℹ️ About":
 
 
 
-st.divider()
-
-
-
-st.caption(
-
-    "CyberGuard — AI-powered cybersecurity threat detection system"
-
-)
+with st.container(key="cyberguard-footer"):
+    st.button(
+        "About CyberGuard",
+        key="nav_about",
+        type="tertiary",
+        on_click=navigate,
+        args=("About",),
+    )
